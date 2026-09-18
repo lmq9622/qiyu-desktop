@@ -20,7 +20,7 @@ import numpy as np
 from loguru import logger
 
 # ============ 配置 ============
-from pathutil import get_data_dir
+from pathutil import get_data_dir, user_dir, get_users_dir
 
 _DATA_DIR = get_data_dir()
 MEMORY_DIR = _DATA_DIR / "memory"
@@ -414,6 +414,7 @@ class MemoryManager:
         self._lock = threading.RLock()
         self._classified_days: set = set()
         self._load_classified_days()
+        self._migrate_legacy_layout()
         self._load_histories()
 
     # ---- 当天/短期/长期三档：某天的聊天记录先在"当天记忆"，4点/空闲时总结分级 ----
@@ -612,7 +613,7 @@ class MemoryManager:
         """获取用户的记忆存储；传入 char_id 时按角色隔离（不同智能体互不串记忆/上下文）"""
         key = f"{user_id}__{char_id}" if char_id else user_id
         if key not in self._stores:
-            self._stores[key] = VectorStore(f"user_{key}")
+            self._stores[key] = VectorStore(f"user_{key}", storage_dir=user_dir(user_id or "anon", "memory"))
         return self._stores[key]
 
     @staticmethod
@@ -623,19 +624,58 @@ class MemoryManager:
     def _safe_name(hk: str) -> str:
         return hk.replace("/", "_").replace("\\", "_").replace(":", "_")
 
+    @staticmethod
+    def _hk_user(hk: str) -> str:
+        return (hk.split("__", 1)[0] if hk else "") or "anon"
+
     def _history_file(self, hk: str) -> Path:
-        return CHAT_HISTORY_DIR / f"{self._safe_name(hk)}.json"
+        # 按用户物理分开：/data/users/<用户>/chat_history/<用户__角色>.json
+        return user_dir(self._hk_user(hk), "chat_history") / f"{self._safe_name(hk)}.json"
+
+    def _migrate_legacy_layout(self):
+        """老版本所有用户挤在一个目录 → 搬进 /data/users/<用户>/<类型>/（原文件留 .moved）"""
+        import shutil as _sh
+        moved = 0
+        try:
+            for sub, sep, legacy_dir in (("chat_history", "__", CHAT_HISTORY_DIR),
+                                         ("chat_logs", "___", DAY_LOG_DIR),
+                                         ("outlines", "___", OUTLINE_DIR)):
+                if not legacy_dir.exists():
+                    continue
+                for p in legacy_dir.glob("*.json"):
+                    hk = p.stem.rsplit(sep, 1)[0] if sep else p.stem
+                    dst = user_dir(self._hk_user(hk), sub) / p.name
+                    try:
+                        if not dst.exists():
+                            _sh.copy2(p, dst)
+                            moved += 1
+                        p.rename(p.with_suffix(".json.moved"))
+                    except Exception:
+                        pass
+            if MEMORY_DIR.exists():
+                for p in MEMORY_DIR.glob("user_*.json"):
+                    hk = p.stem[len("user_"):]
+                    dst = user_dir(self._hk_user(hk), "memory") / p.name
+                    try:
+                        if not dst.exists():
+                            _sh.copy2(p, dst)
+                            moved += 1
+                        p.rename(p.with_suffix(".json.moved"))
+                    except Exception:
+                        pass
+            if moved:
+                logger.info(f"[记忆] 已把 {moved} 个文件按用户拆到 users/<用户>/ 下")
+        except Exception as e:
+            logger.warning(f"[记忆] 老目录迁移失败: {e}")
 
     def _load_histories(self):
-        """启动时从磁盘恢复各 (用户,角色) 的对话历史，保证切换/重启后聊天记录还在"""
+        """启动时从每个用户自己的目录恢复对话历史（/data/users/<用户>/chat_history/**）"""
         try:
-            if not CHAT_HISTORY_DIR.exists():
-                return
-            for p in CHAT_HISTORY_DIR.glob("*.json"):
+            for up in get_users_dir().glob("*/chat_history/*.json"):
                 try:
-                    data = json.loads(p.read_text(encoding="utf-8"))
+                    data = json.loads(up.read_text(encoding="utf-8"))
                     if isinstance(data, list):
-                        self._chat_histories[p.stem] = data
+                        self._chat_histories[up.stem] = data
                 except Exception:
                     pass
         except Exception as e:
@@ -649,7 +689,7 @@ class MemoryManager:
             logger.warning(f"[记忆] 对话历史持久化失败: {e}")
 
     def _day_log_file(self, hk: str, date_str: str) -> Path:
-        return DAY_LOG_DIR / f"{self._safe_name(hk)}___{date_str}.json"
+        return user_dir(self._hk_user(hk), "chat_logs") / f"{self._safe_name(hk)}___{date_str}.json"
 
     def _day_log(self, hk: str, date_str: str) -> List[dict]:
         key = f"{hk}|{date_str}"
@@ -678,7 +718,7 @@ class MemoryManager:
             return list(self._day_log(self._hkey(user_id, char_id), date_str))
 
     def _outline_file(self, hk: str, date_str: str) -> Path:
-        return OUTLINE_DIR / f"{self._safe_name(hk)}___{date_str}.json"
+        return user_dir(self._hk_user(hk), "outlines") / f"{self._safe_name(hk)}___{date_str}.json"
 
     def has_daily_outline(self, user_id: str, date_str: str, char_id: str = "") -> bool:
         return self._outline_file(self._hkey(user_id, char_id), date_str).exists()
@@ -715,7 +755,7 @@ class MemoryManager:
     # ============ 当天事件分条（带权重，影响后续记忆归纳） ============
 
     def _events_file(self, hk: str, date_str: str) -> Path:
-        return OUTLINE_DIR / f"{self._safe_name(hk)}__events___{date_str}.json"
+        return user_dir(self._hk_user(hk), "outlines") / f"{self._safe_name(hk)}__events___{date_str}.json"
 
     def has_daily_events(self, user_id: str, date_str: str, char_id: str = "") -> bool:
         return self._events_file(self._hkey(user_id, char_id), date_str).exists()
@@ -792,10 +832,9 @@ class MemoryManager:
 
         for hk in self._chat_histories:
             add_from(hk)
-        for folder, sep in ((DAY_LOG_DIR, "___"), (OUTLINE_DIR, "___")):
-            if not folder.exists():
-                continue
-            for p in folder.glob("*.json"):
+        for pattern, sep in (("*/chat_logs/*.json", "___"), ("*/outlines/*.json", "___"),
+                             ("*/chat_history/*.json", "__")):
+            for p in get_users_dir().glob(pattern):
                 stem = p.stem
                 hk = stem.rsplit(sep, 1)[0] if sep else stem
                 add_from(hk)
@@ -1471,6 +1510,8 @@ class KnowledgeBase:
 
 _memory_manager: Optional[MemoryManager] = None
 _knowledge_base: Optional[KnowledgeBase] = None
+# 每个用户一个知识库：/data/users/<用户>/knowledge/
+_knowledge_bases: Dict[str, KnowledgeBase] = {}
 
 
 def get_memory_manager() -> MemoryManager:
@@ -1480,7 +1521,16 @@ def get_memory_manager() -> MemoryManager:
     return _memory_manager
 
 
-def get_knowledge_base() -> KnowledgeBase:
+def get_knowledge_base(user_key: str = "") -> KnowledgeBase:
+    """知识库（RAG）。传 user_key 就返回**该用户自己的**知识库，物理分隔；
+    不传则返回公共知识库（只给没有用户上下文的场景用）。"""
+    u = str(user_key or "").strip()
+    if u:
+        kb = _knowledge_bases.get(u)
+        if kb is None:
+            kb = KnowledgeBase(storage_dir=user_dir(u, "knowledge"))
+            _knowledge_bases[u] = kb
+        return kb
     global _knowledge_base
     if _knowledge_base is None:
         _knowledge_base = KnowledgeBase()

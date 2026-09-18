@@ -7,20 +7,20 @@ from loguru import logger
 
 
 from companion.constants import SCENES, SCENE_BEHAVIOR, SCENE_LABELS, SCENE_TRIGGERS, _STORY_STOP_RE
-from companion.state import CONV_STATE_JSON, SHARED_EVENTS_JSON, _conv_store, _schedules_store, _shared_events
+from companion.state import CONV_STATE_JSON, SHARED_EVENTS_JSON, _conv_store, _schedules_store, _shared_events, save_user_store
 from companion.settings import _desire_value
 from companion.relations import _clamp_int, _init_relation
 from companion.emotions import _mood_blocks_proactive
 
 def _save_conv_store():
     try:
-        CONV_STATE_JSON.write_text(json.dumps(_conv_store, ensure_ascii=False, indent=2), encoding="utf-8")
+        save_user_store("conv_state", _conv_store)
     except Exception as e:
         logger.error(f"保存会话状态失败: {e}")
 
 def _save_shared_events():
     try:
-        SHARED_EVENTS_JSON.write_text(json.dumps(_shared_events, ensure_ascii=False, indent=2), encoding="utf-8")
+        save_user_store("shared_events", _shared_events)
     except Exception as e:
         logger.error(f"保存共享事件失败: {e}")
 

@@ -14,11 +14,12 @@ llm_client = None
 
 
 from companion.constants import EMOTION_BASE, EMOTION_KEYS, EMOTION_LABELS
-from companion.state import EMOTIONS_JSON, _emotions_store
+from companion.state import EMOTIONS_JSON, _emotions_store, save_user_store
 
 def _save_emotions():
     try:
-        EMOTIONS_JSON.write_text(json.dumps(_emotions_store, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 按用户分文件：/data/users/<用户>/emotions.json（不再全站一个大文件）
+        save_user_store("emotions", _emotions_store)
     except Exception as e:
         logger.error(f"保存情绪失败: {e}")
 

@@ -218,13 +218,26 @@ def _current_time_block() -> str:
     wd = "一二三四五六日"[now.weekday()]
     return f"【当前时间】{now.strftime('%Y-%m-%d %H:%M')} 星期{wd}（这是你现在所处的真实时间，聊天要用它来感知'现在/刚才/今晚/昨天'）"
 
-def _user_gender_block(char=None) -> str:
-    """用户向（男/女）提示词块：辅助角色用正确的亲密/平级分寸相处，只作背景，不背出来"""
-    try:
-        runtime = load_runtime_settings()
-        gender = str(runtime.get("user_gender") or "").strip().lower()
-    except Exception:
-        gender = ""
+def _user_gender_block(char=None, user_id: str = "") -> str:
+    """用户向（男/女）提示词块：辅助角色用正确的亲密/平级分寸相处，只作背景，不背出来。
+
+    性别必须取**该用户自己账号**的设置。服务端的运行时设置文件是全局共享的，
+    直接读会把某个人设的性别套到所有用户身上（实测：一个用户设了 female，
+    所有男用户都被角色当成"她"，人设当场崩）。
+    """
+    gender = ""
+    if user_id:
+        try:
+            from server.userpool import get_user_pool   # 服务器版：按账号取
+            _u = get_user_pool().get_by_key(user_id) or {}
+            gender = str(_u.get("gender") or "").strip().lower()
+        except Exception:
+            gender = ""      # 服务器版取不到就用"不注入"，绝不回退全局值
+    else:
+        try:
+            gender = str(load_runtime_settings().get("user_gender") or "").strip().lower()
+        except Exception:
+            gender = ""
     if gender not in ("male", "female"):
         return ""
     gender_label = "男生" if gender == "male" else "女生"

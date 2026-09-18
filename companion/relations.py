@@ -12,7 +12,7 @@ char_mgr = get_character_manager()
 mem_mgr = get_memory_manager()
 
 
-from companion.state import PROACTIVE_JSON, RELATIONS_JSON, SCHEDULES_JSON, _proactive_store, _relations_store, _schedules_store
+from companion.state import PROACTIVE_JSON, RELATIONS_JSON, SCHEDULES_JSON, _proactive_store, _relations_store, _schedules_store, save_user_store
 
 def _clamp_int(v, default: int = 50) -> int:
     try:
@@ -43,19 +43,19 @@ def _relation_label(affinity: int) -> str:
 
 def _save_relations():
     try:
-        RELATIONS_JSON.write_text(json.dumps(_relations_store, ensure_ascii=False, indent=2), encoding="utf-8")
+        save_user_store("relations", _relations_store)
     except Exception as e:
         logger.error(f"保存关系数据失败: {e}")
 
 def _save_proactive():
     try:
-        PROACTIVE_JSON.write_text(json.dumps(_proactive_store, ensure_ascii=False, indent=2), encoding="utf-8")
+        save_user_store("proactive", _proactive_store)
     except Exception:
         pass
 
 def _save_schedules():
     try:
-        SCHEDULES_JSON.write_text(json.dumps(_schedules_store, ensure_ascii=False, indent=2), encoding="utf-8")
+        save_user_store("schedules", _schedules_store)
     except Exception:
         pass
 
