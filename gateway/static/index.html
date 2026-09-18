@@ -1029,6 +1029,8 @@
                 <div class="form-group"><label class="form-label">一句话描述</label><input type="text" class="form-input" id="editCharTagline"></div>
             </div>
             <div class="form-group"><label class="form-label">人格描述</label><textarea class="form-textarea" id="editCharDesc" rows="4"></textarea></div>
+            <div class="form-group"><label class="form-label">灵魂 <span class="hint">价值观 / 气质 / 处事态度——最稳定的一层</span></label><textarea class="form-textarea" id="editCharSoul" rows="3" placeholder="如：嘴硬心软，认定的人就护到底；讨厌被可怜"></textarea></div>
+            <div class="form-group"><label class="form-label">红线 <span class="hint">硬约束，优先级最高</span></label><textarea class="form-textarea" id="editCharBounds" rows="3" placeholder="如：不说教不营业；被拒绝就收手；不提自己是 AI"></textarea></div>
             <div class="form-group">
                 <label class="form-label">人设标签 <span class="hint">点击选择，可多选</span></label>
                 <div class="tag-cloud" id="editTagCloud"></div>
@@ -2041,6 +2043,8 @@
             document.getElementById('editCharName').value = char.name;
             document.getElementById('editCharTagline').value = char.tagline || '';
             document.getElementById('editCharDesc').value = char.description || '';
+            { const _s = document.getElementById('editCharSoul'); if (_s) _s.value = char.soul || '';
+              const _b = document.getElementById('editCharBounds'); if (_b) _b.value = char.boundaries || ''; }
             this.state.editSelectedTags = Array.isArray(char.keywords) ? [...char.keywords] : [];
             this.renderTagCloud('editTagCloud', 'editSelectedTagsDisplay', true);
             const styleVal = (typeof char.speech_style === 'object' && char.speech_style) ? (char.speech_style.tone || '温柔亲切') : (char.speech_style || '温柔亲切');
@@ -2061,6 +2065,8 @@
             const name = document.getElementById('editCharName').value.trim();
             const tagline = document.getElementById('editCharTagline').value.trim();
             const description = document.getElementById('editCharDesc').value.trim();
+            const _soul = (document.getElementById('editCharSoul') || {}).value || '';
+            const _bounds = (document.getElementById('editCharBounds') || {}).value || '';
             const keywords = [...this.state.editSelectedTags];
             const speechStyle = document.getElementById('editCharStyle').value;
             const temperature = parseFloat(document.getElementById('editCharTemp').value);
@@ -2070,7 +2076,7 @@
                 const existChar = this.state.characters.find(c => c.id === id);
                 const resume = (existChar && existChar.resume) || {};
                 const persona_params = this.readPersonaParams('epp');
-                await this.api('POST', '/v1/characters', { id, name, tagline, description, temperature, keywords, speech_style: speechStyle, avatar, resume, persona_params });
+                await this.api('POST', '/v1/characters', { id, name, tagline, description, soul: _soul, boundaries: _bounds, temperature, keywords, speech_style: speechStyle, avatar, resume, persona_params });
                 this.toast('角色更新成功！', 'success');
                 this.closeModal('editModal');
                 this.loadCharacters();
