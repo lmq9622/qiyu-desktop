@@ -260,7 +260,13 @@ class LLMClient(MainBrainProvider):
             mem_mgr = get_memory_manager()
             up = mem_mgr.get_user_profile(user_id)
             if up:
-                system_parts.append(f"\n【关于用户的档案（聊天中自然记得，不要背出来）】\n{up}")
+                system_parts.append(
+                    "\n【关于用户的档案（分两层看，聊天中自然记得，不要背出来）】\n"
+                    "事实层（职业/城市/作息/家庭/健康状况等可核对的信息）：**可能过期**——"
+                    "和用户当下的说法冲突时以新说法为准，旧的在心里退役，别拿旧的去反问或纠正他。\n"
+                    "倾向层（爱吃什么、讨厌什么、什么会让他烦、什么会让他笑、情绪模式）："
+                    "这是长期权重，用来决定你的语气和分寸，不要当成事实去核对，也不要一条条念出来。\n"
+                    + up)
 
         # 注入记忆上下文（含"刚说过别表演回忆"的时间距离优先级：当前上下文 > 记忆检索）
         if use_memory and user_id:

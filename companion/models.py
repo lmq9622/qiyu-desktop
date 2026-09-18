@@ -54,6 +54,8 @@ class CreateCharacterRequest(BaseModel):
     avatar: Optional[str] = None
     resume: Optional[dict] = None
     persona_params: Optional[dict] = None
+    soul: Optional[str] = ""        # 灵魂：价值观/气质（最稳定层）
+    boundaries: Optional[str] = ""  # 红线：硬约束（优先级最高）
     user_profile: Optional[str] = None
 
 def parse_resume(text: str) -> dict:

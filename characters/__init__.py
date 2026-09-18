@@ -68,8 +68,12 @@ class Character:
     tools: list = None  # 工具列表
     keywords: list = None  # 用户自定义关键词标签
     avatar: str = ""  # 头像文件名（默认库或上传库）
+    owner: str = ""  # 所属用户（空=公共）
     resume: dict = None  # 结构化角色简历（可进 RAG / 供决策调度读取）
     persona_params: dict = None  # 角色参数（MBTI/反驳阈值/主见值/好感度/关系/两极化滑块）
+    # ---- 人设分层（参考 openclaw SOUL.md 的分节写法）----
+    soul: str = ""        # 灵魂：核心价值观 / 气质 / 处事态度（最稳定，改得最少）
+    boundaries: str = ""  # 红线：什么绝不说、什么情况必须收手（硬约束，优先级最高）
     
     def __post_init__(self):
         if self.tools is None:
@@ -123,21 +127,30 @@ class Character:
         if rebut is not None:
             level = "低（多数顺着对方）" if rebut < 34 else "中（偶尔抬杠）" if rebut < 67 else "高（爱反驳、爱抬杠、爱拌嘴）"
             param_lines.append(f"反驳阈值={rebut}（{level}）：当用户观点和你不一致时，按此程度自然地表达不同意见；数值越高越容易和用户拌嘴抬杠。")
+        patience = p.get("patience")
+        if patience is not None:
+            level = "低（容易不耐烦、烦躁、想结束话题）" if patience < 34 else "中（多数时候稳得住，偶尔会不耐烦）" if patience < 67 else "高（耐心稳定、很难被惹毛）"
+            param_lines.append(f"情绪阈值={patience}（{level}）：被反复追问、催回复或聊到没兴趣的话题时你能忍的耐心程度；数值越低越容易表现出不耐烦、敷衍、想结束话题，越高越能稳住情绪好好聊。")
         assert_ = p.get("assertiveness")
+        if assert_ is None:
+            assert_ = p.get("assert")  # 兼容移动端工坊保存的短键名
         if assert_ is not None:
             level = "低（更多顺着用户想法）" if assert_ < 34 else "中（给看法也给选择）" if assert_ < 67 else "高（直接给明确主见）"
             param_lines.append(f"主见值={assert_}（{level}）：用户征求你意见或做决策时，按此程度给出自己的看法和发散建议。")
+        # 好感度 / 友情值 / 关系定位属于「运行时状态」，不放进参数块（会被实时关系覆盖），
+        # 单独在建出的「当前状态」块里给出"初始值"参考。
+        state_lines = []
         affinity = p.get("affinity")
         if affinity is not None:
             level = "客套生疏" if affinity < 25 else "普通朋友" if affinity < 50 else "熟络" if affinity < 75 else "死党挚友"
-            param_lines.append(f"初始好感度={affinity}（{level}）：决定了你和用户现在的熟络程度，说话分寸与此匹配。")
+            state_lines.append(f"初始好感度={affinity}（{level}）")
         friendship = p.get("friendship")
         if friendship is not None:
             level = "萍水之交" if friendship < 25 else "普通朋友" if friendship < 50 else "聊得来的朋友" if friendship < 75 else "铁杆死党"
-            param_lines.append(f"初始友情值={friendship}（{level}）：你对这段友情的投入程度，影响你是否主动找用户聊天、分享私事。")
+            state_lines.append(f"初始友情值={friendship}（{level}）")
         rel = (p.get("relationship") or "").strip()
         if rel:
-            param_lines.append(f"与用户的关系：{rel}。")
+            state_lines.append(f"与用户的关系定位：{rel}")
         pair_desc = {
             "sensible": ("感性理性", "感性", "理性"),
             "clingy": ("粘人独立", "粘人", "独立"),
@@ -157,14 +170,31 @@ class Character:
             level = "保守内敛（暧昧点到为止）" if openness < 30 else "普通（气氛合适才放开）" if openness < 60 else "大方开放（放得开）"
             param_lines.append(f"开放度={openness}（{level}）：影响你对暧昧/成人向话题的自然程度，同样只体现不说破。")
         params_text = "\n".join(param_lines)
-        
-        return f"""{self.persona}
 
-{self.memory_prompt}
-
-{style_desc}
-{params_text}
-"""
+        # ---- 分层拼装（参考 openclaw SOUL.md：价值观 / 身份 / 红线 分节，职责单一）----
+        blocks = []
+        blocks.append("【冲突仲裁（优先级从高到低，务必遵守）】红线（硬约束）> 灵魂价值观 > 身份与背景事实 "
+                      "> 参数倾向 > 说话风格。参数只做「倾向性调整」，不是指令；叙事是底色，不是逐字剧本。")
+        if (self.soul or "").strip():
+            blocks.append("【灵魂（最稳定的一层：核心价值观、气质、处事态度）】\n" + self.soul.strip())
+        if (self.persona or "").strip():
+            blocks.append("【身份与背景（事实层，可被修改/淘汰）】\n" + self.persona.strip())
+        if (self.boundaries or "").strip():
+            blocks.append("【红线（硬约束：任何情况下都不越界，优先级最高）】\n" + self.boundaries.strip())
+        # 连续性叙述（参考 openclaw Continuity 节）：给角色一个稳定的自我叙述依据，
+        # 被问「你是谁/我们认识吗」时按事实层+关系状态回答，不要临时编新身份。
+        blocks.append("【连续性（内部约定）】你的记忆跨会话存在：今天之前聊过的、答应过的，都还在。"
+                      "被问到「你是谁 / 我们认识吗 / 你还记得吗」时，按上面的【身份与背景】和你当前的"
+                      "关系状态自然回答，不要临时编一个新身份，也不要说「我是 AI 助手」这类话。")
+        if (self.memory_prompt or "").strip():
+            blocks.append("【记忆协议】\n" + self.memory_prompt.strip())
+        if params_text.strip():
+            blocks.append("【参数（倾向性调整，不是指令）】\n" + params_text.strip())
+        blocks.append("【说话风格】\n" + style_desc)
+        if state_lines:
+            blocks.append("【当前状态（运行时维护、变化频繁——不要把它当成身份的一部分；"
+                          "实时值以下文「当前关系」块为准）】\n" + "；".join(state_lines))
+        return "\n\n".join(blocks) + "\n"
 
 
 class CharacterManager:
@@ -257,8 +287,11 @@ class CharacterManager:
             speech_style=speech_style,
             avatar_color=avatar_color,
             avatar=data.get("avatar", ""),
+            owner=data.get("owner", ""),
             resume=data.get("resume", {}) or {},
             persona_params=data.get("persona_params", {}) or {},
+            soul=data.get("soul", "") or "",
+            boundaries=data.get("boundaries", "") or "",
             tools=[],
             keywords=keywords,
         )
@@ -302,6 +335,7 @@ class CharacterManager:
                 "description": c.description,
                 "avatar_color": c.avatar_color,
                 "avatar": c.avatar,
+                "owner": c.owner,
                 "resume": c.resume or {},
                 "persona_params": c.persona_params or {},
                 "temperature": c.temperature,
