@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Qiyu 运行时设置与提示块（从 demo.py 迁移，M1）。"""
+import os
 import re
 import json
 import time
@@ -160,8 +161,41 @@ def save_runtime_settings(settings: dict):
     except Exception as e:
         logger.error(f"保存设置失败: {e}")
 
-def _apply_thinking_kwargs(payload: dict):
-    """思考开关 + 强度：off=显式禁用推理（首字更快、更像真人直出）；low/mid/high/ultra=开启并按强度给思考预算"""
+# 真正需要动脑的标记（求知/写作/分析/代码/长内容）
+_THINK_KW_RE = re.compile(
+    r"为什么|为啥|帮我|解释|分析|总结|归纳|整理|翻译|代码|报错|调试|方案|计划|步骤|教程|详细|展开讲|"
+    r"对比|区别|推荐|算一下|计算|推算|推理|证明|优化|设计|介绍一下|列个|列出|清单|写一[个段篇]|写个|长文|"
+    r"story|explain|why|how to|translate|code|debug",
+    re.I,
+)
+
+
+def _needs_thinking(user_text: str) -> bool:
+    """这轮值不值得开思考。
+
+    实测（x99 本地 27B）：短句闲聊开思考会多生成 300~500 个 reasoning token，
+    一轮从 5~8 秒变成 37~40 秒，用户感知就是"发消息半天不回来"。
+    所以只有真的需要动脑（求知/写作/分析/代码）或用户写了一大段时才开思考，
+    纯寒暄/口头禅/极短消息一律关掉直接出正文。
+    """
+    t = (user_text or "").strip()
+    if not t:
+        return False
+    if _THINK_KW_RE.search(t):
+        return True
+    if len(t) <= 18:
+        return False          # 极短口语：直接出
+    if len(t) >= 60:
+        return True           # 用户写了一大段：值得想一下
+    # 中等长度：明显在求教/要判断/要建议的才想一下，纯闲聊照样直出
+    if len(t) >= 14 and re.search(r"怎么|如何|该不该|要不要|是不是|值不值|能不能|觉得|建议|纠结|选择|？|\?", t):
+        return True
+    return False
+
+
+def _apply_thinking_kwargs(payload: dict, user_text: str = ""):
+    """思考开关 + 强度：off=显式禁用推理（首字更快、更像真人直出）；low/mid/high/ultra=开启并按强度给思考预算。
+    user_text 传入本轮用户原文后会做自适应：短句闲聊直接关思考，难题才用设置里的档位。"""
     runtime = load_runtime_settings()
     level = str(runtime.get("thinking_level") or "off").strip().lower()
     if level == "off":
@@ -171,6 +205,10 @@ def _apply_thinking_kwargs(payload: dict):
         else:
             payload["chat_template_kwargs"] = {"enable_thinking": False}
             return
+    # 自适应：设置里开着思考，但这一轮只是短句闲聊 → 关掉（省 20~30 秒、省一大半输出 token）
+    if user_text and os.getenv("QIYU_NO_ADAPTIVE_THINKING", "0") != "1" and not _needs_thinking(user_text):
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
+        return
     budget = {"low": 1024, "mid": 2048, "high": 4096, "ultra": 8192}.get(level, 2048)
     payload["chat_template_kwargs"] = {"enable_thinking": True, "thinking_budget": budget}
 
@@ -397,6 +435,7 @@ def _nudge_plan(investment: int, first_after: int = 5) -> list:
 
 __all__ = [
     "_apply_thinking_kwargs",
+    "_needs_thinking",
     "_current_time_block",
     "_desire_block",
     "_desire_value",

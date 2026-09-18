@@ -97,8 +97,10 @@ class LLMClient(MainBrainProvider):
         char = char_mgr.get_character(char_id)
 
         # 构建系统提示词（平级人设约束写死，优先级最高）
+        # 注意：_current_time_block（当前时间）**必须放在最末尾**再拼——它每分钟都变，
+        # 放开头会让 llama.cpp 的前缀缓存整个失效，每轮都要重新 prefill 上万 token
+        # （实测：时间块在前 → 缓存全失效、全量 prefill；挪到末尾 → 大部分命中）。
         system_parts = [PEER_ROLE_PROMPT]
-        system_parts.append(_current_time_block())
         try:
             _net_ctx = await _user_network_context()
             if _net_ctx:
@@ -398,7 +400,22 @@ class LLMClient(MainBrainProvider):
             "\n\n【最后提醒（必须遵守）】只输出 JSON（包含 conversation_state 和 messages），不要输出任何其他内容、"
             "不要解释、不要 Markdown 代码块；消息要像真人随手发的微信。"
         )
+        # 易变块（当前时间）统一压到最后：保证前面的人设/红线/角色卡是最长稳定前缀
+        try:
+            system_parts.append(_current_time_block())
+        except Exception:
+            pass
         return "\n".join(system_parts) + final_reminder
+
+    def _last_user_text(self, messages) -> str:
+        """取本轮最后一条用户消息的纯文本（自适应思考判定用）"""
+        try:
+            for m in reversed(messages or []):
+                if (m or {}).get("role") == "user":
+                    return _msg_text((m or {}).get("content", ""))
+        except Exception:
+            pass
+        return ""
 
     async def chat(self, char_id: str, messages: list, temperature: float = 0.7,
                    user_id: str = "", use_memory: bool = True, use_rag: bool = True,
@@ -444,7 +461,9 @@ class LLMClient(MainBrainProvider):
     async def summarize_text(self, prompt: str, max_tokens: int = 800) -> str:
         """记忆流水线用：无上下文的独立 LLM 调用（压缩/提事实）"""
         system_msg = "你是后台记忆整理器，只输出整理结果本身，不解释、不客套。"
-        return await self._call_real_llm(system_msg, [{"role": "user", "content": prompt}], 0.3)
+        # 后台整理不需要思考链：开着会多烧 1000~2000 个 reasoning token，还抢推理槽
+        return await self._call_real_llm(system_msg, [{"role": "user", "content": prompt}], 0.3,
+                                         no_thinking=True)
     async def generate_nudge(self, char_id: str, user_id: str, context: str = "", attempt: int = 0, total: int = 1) -> list:
         """提问/给建议后几分钟没回复：按追问梯次（attempt/total）生成自然的真人追问（JSON 消息列表）。
         第 1 次先轻轻问一句（可以是『？』『人呢』）；后面才逐步加急/调侃。"""
@@ -765,9 +784,9 @@ class LLMClient(MainBrainProvider):
             "max_tokens": 6000,
         }
         if no_thinking:
-            payload.pop("chat_template_kwargs", None)
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         else:
-            _apply_thinking_kwargs(payload)
+            _apply_thinking_kwargs(payload, _last_user_text(messages))
         
         async with httpx.AsyncClient(timeout=180) as client:
             resp = await client.post(f"{url}/chat/completions", json=payload, headers=headers)
@@ -812,8 +831,11 @@ class LLMClient(MainBrainProvider):
             "max_tokens": 6000,
             "stream": True,
         }
-        _apply_thinking_kwargs(payload)
+        _apply_thinking_kwargs(payload, _last_user_text(messages))
         thinking_on = bool((payload.get("chat_template_kwargs") or {}).get("enable_thinking") in (True, "true", "True", 1))
+        # 计时诊断：首字延迟 + 整轮耗时 + 思考开关（排查"回得慢/是不是重复等待"用）
+        _t0 = time.time()
+        _ttft = [0.0]
         async with httpx.AsyncClient(timeout=420) as client:
             for _attempt in range(3):
                 try:
@@ -839,6 +861,8 @@ class LLMClient(MainBrainProvider):
                             if content:
                                 seen_content += content
                             if reasoning or content:
+                                if not _ttft[0]:
+                                    _ttft[0] = time.time() - _t0
                                 yield reasoning, content
                     # 思考模型把预算全耗在推理上、正片为空：降级为不思考重试一次，
                     # 避免前端只拿到推理过程而正文只有「……」
@@ -847,6 +871,10 @@ class LLMClient(MainBrainProvider):
                         payload.pop("chat_template_kwargs", None)
                         logger.warning("[流式] 思考模式返回空正文，降级为不思考重试")
                         continue
+                    logger.info(
+                        f"[LLM] 流式完成 思考={'on' if thinking_on else 'off'} "
+                        f"首字={_ttft[0]:.1f}s 总={time.time() - _t0:.1f}s "
+                        f"用户={(messages[-1].get('content') or '')[:16] if messages else ''}")
                     return
                 except httpx.HTTPStatusError as e:
                     if _attempt == 0 and e.response.status_code == 400 and "chat_template_kwargs" in payload:

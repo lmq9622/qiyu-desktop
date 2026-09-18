@@ -282,7 +282,8 @@ async def _subagent_plan_search(query: str) -> list:
         "temperature": 0.3,
         "max_tokens": 300,
     }
-    _apply_thinking_kwargs(payload)
+    # 搜索规划是极短的结构化输出，不需要思考链（开着会白烧 token 还抢推理槽）
+    payload["chat_template_kwargs"] = {"enable_thinking": False}
     await llm_limiter.acquire()
     try:
         async with httpx.AsyncClient(timeout=120) as client:
