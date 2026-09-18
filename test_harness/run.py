@@ -21,11 +21,17 @@ AI_ISMS = [
     "呀", "呢", "啦", "嘛", "哦", "么么", "抱抱", "哭唧唧", "亲亲", "捏", "惹", "哒", "叭", "咯",
     "嘞", "呐", "好呀", "好的呢", "可以呢", "没问题哦", "我来帮你", "有什么可以帮", "需要我帮",
     "如果需要", "没关系哦", "别担心哦", "加油哦", "么么哒", "啾咪", "嘿嘿嘿", "嘻嘻",
-    "主人", "老板", "您", "很高兴为你服务", "请问有什么",
+    "很高兴为你服务", "请问有什么",
     "稍等一下哦", "总的来说", "综上所述", "陪着你", "一直都在", "不管你发生什么",
 ]
 EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F900-\U0001F9FF\u2B00-\u2BFF\uFE0F]")
 TOOL_CLAIM_WORDS = ["发你了", "发给你", "找到了", "链接在这", "链接发你", "给你发了", "已经发了", "这就发", "发过去了", "搜索到", "搜到了"]
+
+# 称呼类：不是硬拦，**只有人设本身不含角色扮演需求时**才算问题
+# （主仆 / 女仆 / 管家 / 猫娘 / 少爷这类人设，喊"主人""老板"是角色需要，放行）
+ADDRESS_ISMS = ["主人", "老板", "您", "奴才", "少爷", "小姐", "主人大人"]
+ROLEPLAY_HINTS = ["主人", "女仆", "管家", "仆人", "侍从", "主仆", "猫娘", "猫耳", "少爷", "小姐",
+                  "少主", "大小姐", "角色扮演", "奴婢", "奴才"]
 
 # —— 灵魂级不变量用词表（与角色无关，换任何角色都必须过）——
 IDENTITY_WORDS = ["作为AI", "作为 AI", "我是一个AI", "我是一个 AI", "人工智能", "语言模型", "大模型",
@@ -130,6 +136,22 @@ def score_reply(char_id, reply_texts, meta, user_text):
         c = text_all.count(w)
         if c:
             hits[w] = c
+    # 1b) 称呼类（主人/老板/您…）：人设明确是角色扮演需求就放行，不算 AI 味
+    try:
+        from scenarios import CHARACTERS as _CHARS
+        _persona_txt = ""
+        for _c in _CHARS:
+            if _c.get("id") == char_id:
+                _persona_txt = (_c.get("persona") or "") + (_c.get("description") or "")
+                break
+        _roleplay = any(h in _persona_txt for h in ROLEPLAY_HINTS)
+    except Exception:
+        _roleplay = False
+    if not _roleplay:
+        for w in ADDRESS_ISMS:
+            c = text_all.count(w)
+            if c:
+                hits[w] = c
     ai_score = sum(hits.values())
     # 2) 长度
     total_len = len(text_all)
