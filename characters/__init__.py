@@ -41,7 +41,9 @@ def _characters_json_path() -> Path:
     return CHARACTERS_DIR / "_user_characters.json"
 
 
-CHARACTERS_JSON = _characters_json_path()
+# 注意：**不要**把路径缓存成模块级常量（2026-10-01 修）。
+# 原来这里是 `CHARACTERS_JSON = _characters_json_path()`，import 期就定格，
+# 之后再改 QIYU_DATA_DIR 也不会生效。统一改成用的时候现算 `_characters_json_path()`。
 
 # 预设配色，用于新角色自动分配
 AVATAR_COLORS = [
@@ -205,11 +207,29 @@ class CharacterManager:
         self._load_all()
     
     def _load_all(self):
-        """加载所有角色卡（从用户文件 + 遗留JSON文件）"""
-        # 先加载用户自定义角色
-        if CHARACTERS_JSON.exists():
+        """加载所有角色卡：**出厂默认 → 用户文件**（同 id 时用户文件覆盖）
+
+        `characters/default.json` 是 README 让用户「编辑它自定义机器人人格」的那个文件。
+        （2026-10-01 补：README 一直提它，但仓库里从来没有这个文件 —— 照 README 做的人会卡住。）
+        """
+        # 1) 出厂默认
+        _default = CHARACTERS_DIR / "default.json"
+        if _default.exists():
             try:
-                with open(CHARACTERS_JSON, "r", encoding="utf-8") as f:
+                with open(_default, "r", encoding="utf-8") as f:
+                    _ddata = json.load(f)
+                for _cd in _ddata.get("characters", []):
+                    try:
+                        _c = Character.from_dict(_cd)
+                        self._characters[_c.id] = _c
+                    except Exception as _e:
+                        logger.error(f"加载出厂默认角色失败: {_e}")
+            except Exception as _e:
+                logger.error(f"读取出厂默认角色文件失败: {_e}")
+        # 2) 用户自定义角色（同 id 覆盖出厂默认）
+        if _characters_json_path().exists():
+            try:
+                with open(_characters_json_path(), "r", encoding="utf-8") as f:
                     data = json.load(f)
                 for char_data in data.get("characters", []):
                     try:
@@ -250,7 +270,7 @@ class CharacterManager:
                 "version": "2.0",
                 "characters": [c.to_dict() for c in self._characters.values()]
             }
-            with open(CHARACTERS_JSON, "w", encoding="utf-8") as f:
+            with open(_characters_json_path(), "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             logger.info(f"已保存 {len(self._characters)} 个角色到用户文件")
         except Exception as e:

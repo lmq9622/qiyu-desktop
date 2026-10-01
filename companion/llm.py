@@ -463,7 +463,15 @@ class LLMClient(MainBrainProvider):
             except Exception as e:
                 logger.warning(f"[LLM] 空正文兜底重试失败: {e}")
         if not reply:
-            reply = "（我这边好像没接住，你再说一遍？）"
+            # 别回"我这边好像没接住"这种机器话（用户 2026-09-29 实测：他发「在吗」，
+            # 她回了两次这句）。按对方刚说了什么给一句自然的。
+            _u = (user_content or "").strip()
+            if _u in ("在吗", "在不在", "在么", "人呢", "喂", "哈喽", "hi", "hello", "嗨"):
+                reply = "在呢"
+            elif _u.endswith(("？", "?")) or _u.startswith(("为什么", "怎么", "啥", "什么")):
+                reply = "刚卡了一下 你再说一遍"
+            else:
+                reply = "刚走神了一下 你说"
             pieces = [{"text": reply, "type": "statement", "delay": 0}]
         return reply, pieces
 

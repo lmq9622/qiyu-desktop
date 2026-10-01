@@ -996,9 +996,13 @@ async def chat_completions(request: ChatRequest):
                             parsed = _parsed3
                     except Exception as _retry_e:
                         logger.warning(f"[Chat] 空回复兜底重试失败: {_retry_e}")
-                # 重拉仍空：回诚实兜底句，绝不回"……"
+                # 重拉仍空：给一句自然的兜底，绝不回"……"，也别回"我这边没接住"那种机器话
                 if not parsed["messages"]:
-                    parsed["messages"] = [{"text": "（刚才这条我没接住，你再说一遍？）", "type": "statement", "delay": 0}]
+                    _u = (user_content or "").strip()
+                    _fb = ("在呢" if _u in ("在吗", "在不在", "在么", "人呢", "喂", "哈喽", "hi", "hello", "嗨")
+                           else "刚卡了一下 你再说一遍" if (_u.endswith(("？", "?")) or _u.startswith(("为什么", "怎么", "啥", "什么")))
+                           else "刚走神了一下 你说")
+                    parsed["messages"] = [{"text": _fb, "type": "statement", "delay": 0}]
                 # 增量没推完的（JSON 在末尾才闭合）在这里补齐
                 if len(parsed["messages"]) > safe_pushed:
                     new_msgs = parsed["messages"][safe_pushed:]
