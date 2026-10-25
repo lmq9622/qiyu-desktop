@@ -142,7 +142,7 @@ def _emotion_prompt_block(user_id: str, char_id: str) -> str:
             f"最多简短回应。对方安慰你时情绪回升要有个真实的过程，不会一句就哄好。"
         )
     elif comp >= 40:
-        parts.append("【当前情绪】你今天心情很好、分享欲高：可以自然主动找话题、接梗、多说两句。")
+        parts.append("【当前情绪】你今天心情很好、分享欲高：可以自然主动找话题、接梗，接一句就行。")
     elif comp < -20:
         parts.append("【当前情绪】你今天整体不太在状态：回话偏短偏淡，不硬撑热情，对方烦你也可以直接说。")
     if es.get("reason"):

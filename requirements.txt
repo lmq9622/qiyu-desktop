@@ -44,3 +44,8 @@ pyyaml>=6.0.1
 
 # ============ 运行时（M2：硬件检测） ============
 psutil>=5.9.0
+
+# QY3 角色包（v1 不加密容器）
+msgpack>=1.0.7
+zstandard>=0.22
+cryptography>=42.0

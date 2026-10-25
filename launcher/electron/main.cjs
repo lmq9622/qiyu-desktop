@@ -8,7 +8,7 @@ const fs = require('node:fs')
 
 const BACKEND_HOST = '127.0.0.1'
 const BACKEND_PORT = Number(process.env.QIYU_PORT || 8765)
-const APP_TITLE = '栖语 · Qiyu'
+const APP_TITLE = '栖语 Qiyu'
 
 let mainWindow = null
 let tray = null
@@ -142,7 +142,7 @@ function createTray() {
     }
   } catch (e) { icon = nativeImage.createEmpty() }
   tray = new Tray(icon.resize({ width: 16, height: 16 }))
-  tray.setToolTip('栖语')
+  tray.setToolTip('栖语 Qiyu')
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '显示主窗口', click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus() } } },
     { type: 'separator' },
@@ -163,7 +163,7 @@ if (!gotLock) {
     const started = startBackend()
     const health = await waitForBackend()
     if (!started || !health) {
-      dialog.showErrorBox('栖语启动失败',
+      dialog.showErrorBox('栖语 Qiyu 启动失败',
         '后端服务未能启动。请确认本机已安装 Python 3.12+，且 127.0.0.1:' + BACKEND_PORT + ' 未被占用。\n详细日志：' +
         path.join(app.getPath('userData'), 'logs', 'desktop.log'))
       stopBackend()

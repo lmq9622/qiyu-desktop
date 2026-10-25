@@ -114,6 +114,38 @@ def _ensure_wav(src: str) -> str:
             return src
     except Exception:
         pass
+    return _ffmpeg_to_wav(src)
+
+
+def _wav_16k_mono(path: str):
+    """把 wav 读成 16bit / 16k / 单声道 的裸 PCM（sherpa-onnx 只吃 16k 单声道）。
+
+    TTS（CosyVoice）吐出来的是 24k wav，手机录音多是 16k，浏览器还可能给 44.1k——
+    以前这里 assert 采样率，非 16k 直接抛异常被吞掉，表现就是「语音发出去却转不出字」。
+    现在不依赖 ffmpeg：多声道取平均，非 16k 用线性插值重采样。读不了/非 16bit 返回 None。
+    """
+    import wave
+    import numpy as np
+    try:
+        with wave.open(path, "rb") as w:
+            ch, sr, sw, n = w.getnchannels(), w.getframerate(), w.getsampwidth(), w.getnframes()
+            if sw != 2 or n <= 0:
+                return None
+            raw = w.readframes(n)
+    except Exception:
+        return None
+    a = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
+    if ch > 1:
+        a = a.reshape(-1, ch).mean(axis=1)
+    if sr != 16000 and len(a) > 1:
+        dst = max(1, int(round(len(a) * 16000.0 / float(sr))))
+        a = np.interp(np.arange(dst) / 16000.0, np.arange(len(a)) / float(sr), a)
+    return np.asarray(np.clip(np.round(a), -32768, 32767), dtype=np.int16).tobytes()
+
+
+def _ffmpeg_to_wav(src: str) -> str:
+    """非 wav（silk/amr/mp3/ogg）走 ffmpeg 转 16k 单声道；没有 ffmpeg 返回空串。"""
+    tool = ""
     for tool in ("ffmpeg", "ffmpeg.exe"):
         try:
             subprocess.run([tool, "-version"], capture_output=True, timeout=5)
@@ -161,13 +193,12 @@ def _transcribe_bytes(raw: bytes, ext: str = "silk") -> str:
         wav = _ensure_wav(tmp.name)
         if not wav:
             return ""
-        import wave
-        with wave.open(wav, "rb") as w:
-            assert w.getnchannels() == 1 and w.getframerate() == 16000
-            samples = w.readframes(w.getnframes())
+        pcm = _wav_16k_mono(wav)
+        if not pcm:
+            return ""
         s = rec.create_stream()
         import numpy as np
-        s.accept_waveform(16000, np.frombuffer(samples, dtype=np.int16).astype(np.float32) / 32768.0)
+        s.accept_waveform(16000, np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0)
         rec.decode_stream(s)
         text = (s.result.text or "").strip()
         return text

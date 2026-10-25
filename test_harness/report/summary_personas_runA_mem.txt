@@ -1,5 +1,0 @@
-===== runA_mem =====
-总:60 通过:60 失败:0
-分类: memory=60
-人设: p_m_warm=5/5, p_m_tsun=5/5, p_m_yuanqi=5/5, p_m_bro=5/5, p_m_laoge=5/5, p_m_game=5/5, p_f_warm=5/5, p_f_cold=5/5, p_f_sun=5/5, p_f_guimi=5/5, p_f_dushe=5/5, p_f_tree=5/5
-高频问题: 

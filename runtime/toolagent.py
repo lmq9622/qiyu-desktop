@@ -7,6 +7,7 @@ ToolAgent：子代理规划关键词 → 真实执行（tools.web）→ 返回�
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
@@ -100,7 +101,13 @@ class ToolAgent(AIProvider):
             return ToolEvidence(False, [], query, backend="empty-query")
         from runtime.concurrency import concurrency_limiter
         async with concurrency_limiter.slot("tool"):
-            return await self._search_locked(query)
+            # 离线机器连不出去时必须快速失败，否则工具协程挂死、占满 tool 分闸，
+            # 把整条聊天链路堵住。
+            try:
+                return await asyncio.wait_for(self._search_locked(query), timeout=12)
+            except Exception as e:
+                logger.warning(f"[ToolAgent] 搜索超时/失败: {e}")
+                return ToolEvidence(False, [], query, backend="timeout")
 
     async def _search_locked(self, query: str) -> ToolEvidence:
         keywords = await self._plan(query)
@@ -136,7 +143,11 @@ class ToolAgent(AIProvider):
             return ToolEvidence(False, [], query, backend="empty-query")
         from runtime.concurrency import concurrency_limiter
         async with concurrency_limiter.slot("tool"):
-            return await self._search_images_locked(query)
+            try:
+                return await asyncio.wait_for(self._search_images_locked(query), timeout=12)
+            except Exception as e:
+                logger.warning(f"[ToolAgent] 搜图超时/失败: {e}")
+                return ToolEvidence(False, [], query, backend="timeout")
 
     async def _search_images_locked(self, query: str) -> ToolEvidence:
         keywords = await self._plan(query)

@@ -1,7 +1,7 @@
 {
   "name": "qiyu-desktop",
-  "productName": "栖语",
-  "version": "2.1.0",
+  "productName": "栖语 Qiyu",
+  "version": "1.0.0",
   "description": "栖语 Qiyu - 平级 AI 伙伴桌面程序",
   "author": "Qiyu",
   "private": true,
@@ -16,7 +16,7 @@
   },
   "build": {
     "appId": "com.qiyu.desktop",
-    "productName": "栖语",
+    "productName": "栖语 Qiyu",
     "directories": {
       "output": "release"
     },
@@ -76,7 +76,7 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "shortcutName": "栖语"
+      "shortcutName": "栖语 Qiyu"
     }
   }
 }

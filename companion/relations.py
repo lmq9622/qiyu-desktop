@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Qiyu 关系/日程/主动概率状态（从 demo.py 迁移，M1）。"""
 import json
+import re
 import time
 import random
 import uuid
@@ -86,6 +87,17 @@ def _reminder_due_time(char_id: str, at_ts: float, weight: float) -> float:
 def _register_schedule(user_id: str, task: dict):
     """注册一个定时触发任务（nudge/reminder），持久化"""
     tasks = _schedules_store.setdefault(user_id, [])
+    if task.get("kind") == "reminder":
+        # 同一件事、同一个时间只留一个：模型回复为空重试时会把 schedules 再执行一遍，
+        # 以前不去重 → 到点会发两条提醒。
+        _p = task.get("payload") or {}
+        for t in tasks:
+            _tp = t.get("payload") or {}
+            if (t.get("kind") == "reminder" and not t.get("done")
+                    and _tp.get("char_id") == _p.get("char_id")
+                    and _tp.get("text") == _p.get("text")
+                    and abs(float(t.get("due_at") or 0) - float(task.get("due_at") or 0)) < 300):
+                return
     task["id"] = uuid.uuid4().hex[:10]
     task["done"] = False
     task["created_at"] = time.time()
@@ -117,12 +129,187 @@ def _cancel_nudge(user_id: str, char_id: str = ""):
         _save_schedules()
 
 def _proactive_day_prob(affinity: int) -> float:
-    """白天每 30 分钟判定的主动概率：好感度越高越频繁（35%~70%）"""
-    return 0.35 + (affinity / 100) * 0.35
+    """白天每次判定的主动概率（调度器约每 10 分钟才掷一次骰子，好感越高越勤：约 34%~62%）"""
+    return 0.34 + (affinity / 100) * 0.28
 
 def _proactive_night_prob(affinity: int) -> float:
     """夜间主动概率：3%~10%，好感度越高越可能（凌晨求安慰/分享心事）"""
     return 0.03 + (affinity / 100) * 0.07
+
+
+# 人设职业/身份 → 不该闲聊的时段（学生上课、上班族上班、医生值班、夜班睡觉……）
+# 按顺序匹配，第一个命中就定身份：夜班放最前，否则"夜班护士"会被"护士"先认成白班医护
+_PERSONA_OCCUPATION_HINTS = (
+    ("nightshift", ("夜班", "上夜", "值夜", "半夜上班", "通宵班")),
+    ("student", ("学生", "上学", "在校", "高三", "高二", "高一", "初三", "初二", "初一", "初中",
+                 "大学", "大一", "大二", "大三", "大四", "研究生", "上课", "school", "班级", "作业", "备考", "考研")),
+    ("teacher", ("老师", "教师", "带班", "班主任", "教授", "讲师")),
+    ("medical", ("护士", "医生", "大夫", "护师", "实习医", "住院部", "值班室")),
+    ("office", ("上班", "公司", "职场", "社畜", "打工人", "职员", "白领", "工位", "office",
+                "程序员", "开发", "码农", "工程师", "设计师", "会计", "销售", "公务员", "银行")),
+    ("nightshift", ("夜店", "酒吧")),                 # 在夜店/酒吧上班；排在学生、上班族之后
+    ("service", ("店员", "服务员", "导购", "外卖", "骑手", "快递", "司机", "网约车", "美容", "美发")),
+    ("performer", ("主播", "演员", "艺人", "模特", "歌手", "自媒体", "开播")),
+    ("free", ("自由职业", "在家办公", "全职太太", "家庭主妇", "无业", "待业", "退休")),
+)
+
+# 身份 → 工作日"本来就在忙"的时段（小时区间，左闭右开）
+_OCCUPATION_BUSY_HOURS = {
+    "student": (8, 17),
+    "teacher": (7, 17),
+    "medical": (8, 18),
+    "office": (9, 18),
+    "service": (10, 21),
+}
+
+_GRADUATED_RE = re.compile(
+    r"(?:大学|大专|本科|研究生|硕士|博士|高中|初中|中专)(?:已经|早就|刚)?毕业[了后]?|毕业于\S{0,12}|已毕业|毕业[了后多]"
+)
+
+
+def strip_graduated(text: str) -> str:
+    """去掉"大学毕业 / 毕业于XX大学"这类经历描述，免得上班族被"大学"认成学生。"""
+    return _GRADUATED_RE.sub(" ", str(text or ""))
+
+
+def persona_occupation(char=None) -> str:
+    """从人设/简历里判断这个角色的身份（student/office/teacher/medical/service/...）。"""
+    try:
+        if char is None:
+            return ""
+        parts = [getattr(char, "persona", "") or "", getattr(char, "description", "") or ""]
+        rp = getattr(char, "persona_params", None) or {}
+        rs = getattr(char, "resume", None) or {}
+        try:
+            parts.append(str(rp.get("occupation") or ""))
+            parts.append(str(rs.get("职业") or "") + str(rs.get("身份") or "") + str(rs.get("年龄") or ""))
+        except Exception:
+            pass
+        text = strip_graduated(" ".join(parts))
+        for name, kws in _PERSONA_OCCUPATION_HINTS:
+            if any(k in text for k in kws):
+                return name
+    except Exception:
+        pass
+    return ""
+
+
+def is_school_holiday(d=None) -> bool:
+    """(粗略) 学生寒暑假：寒假 1/10~2/20、暑假 7/1~8/31 —— 放假期间不受"工作日白天在上课"限制。"""
+    try:
+        import datetime as _dt
+        d = d or _dt.datetime.now()
+        m, day = d.month, d.day
+        if m == 1 and day >= 10:
+            return True
+        if m == 2 and day <= 20:
+            return True
+        if m in (7, 8):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def persona_busy_now(char=None, now=None) -> bool:
+    """现在这个点，按人设身份"本来就在忙"吗（学生工作日上课、上班族工作日上班…）。"""
+    try:
+        import time as _t, datetime as _dt
+        occ = persona_occupation(char)
+        if not occ or occ == "free":
+            return False
+        d = _dt.datetime.fromtimestamp(float(now) if now else _t.time())
+        h = d.hour
+        if occ == "nightshift":
+            return h >= 22 or h < 7                      # 夜班：夜里到清晨在忙
+        if occ == "performer":
+            return 18 <= h < 23                          # 主播/艺人：晚上开播
+        if occ == "student":
+            if is_school_holiday(d):                     # 寒暑假 → 不按上课时间限制
+                return False
+            return d.weekday() < 5 and 8 <= h < 17
+        win = _OCCUPATION_BUSY_HOURS.get(occ)
+        if not win:
+            return False
+        if d.weekday() >= 5:
+            return False                                 # 周末不算忙
+        return win[0] <= h < win[1]
+    except Exception:
+        pass
+    return False
+
+
+def _proactive_daily_cap(affinity: int) -> int:
+    """每天最多主动几次（硬上限）。
+
+    真人不会一天单向发十几条：普通关系 1 条，熟一点 2 条，很近 3 条。
+    """
+    a = int(affinity or 0)
+    if a <= 40:
+        return 1
+    if a <= 70:
+        return 2
+    return 3
+
+
+_COLD_WORDS = (
+    "别发", "别找", "别来", "别闹", "别烦", "别说了", "别打扰", "少发", "少找", "少来",
+    "烦了", "真烦", "好烦", "很烦", "太烦", "烦人", "嫌烦", "烦死", "能不能别",
+    "不用了", "不用回", "不想聊", "不想回", "没意思", "没话找话", "无聊", "腻了",
+    "打扰", "闭嘴", "闭麦", "够了", "滚",
+)
+_WARM_HINTS = ("？", "?", "哈哈", "想你", "想聊", "在干嘛", "干嘛呢", "好呀", "嗯嗯", "来呀")
+
+
+def reset_no_reply_streak(user_id: str, char_id: str) -> None:
+    """用户开口了（不管隔了多久）→ "连续没人回"的找话计数清零。
+
+    以前只有 1 小时内回主动消息才清零，用户隔天才回时计数卡在上限，
+    调度器就再也不让角色主动找话了。
+    """
+    key = f"{user_id}::{char_id}"
+    entry = _proactive_store.get(key)
+    if entry and int(entry.get("no_reply_streak") or 0):
+        entry = dict(entry)
+        entry["no_reply_streak"] = 0
+        _proactive_store[key] = entry
+        _save_proactive()
+
+
+def note_proactive_reply(user_id: str, char_id: str, text: str) -> str:
+    """用户对主动消息的回复反馈：冷淡→即时停手(24h)，连续冷淡→72h 减半频率；热情→清零。
+    返回 cold / warm / neutral"""
+    key = f"{user_id}::{char_id}"
+    entry = dict(_proactive_store.get(key) or {})
+    now = int(time.time())
+    t = (text or "").strip()
+    if not t:
+        return "neutral"
+    cold = any(w in t for w in _COLD_WORDS)
+    warm = (not cold) and ((len(t) >= 10) or any(w in t for w in _WARM_HINTS))
+    # 用户有回应 → 连续无回复计数清零（找话次数按"没人回"算，不是按每天算）
+    entry["no_reply_streak"] = 0
+    if warm:
+        entry["cold_streak"] = 0
+        entry.pop("penalty_until", None)
+        _proactive_store[key] = entry
+        _save_proactive()
+        return "warm"
+    if cold:
+        # 只有命中明确"嫌烦"词（别烦/烦死了/别发了/闭嘴/滚…）才记冷淡。
+        # 短回复（"谢谢/对/收到/嗯/没事/好的"）不再算冷淡 —— 以前 len<=3 就当冷，
+        # 连续两条短回复 → cold_until +24h、penalty 72h，纯属误伤。
+        streak = int(entry.get("cold_streak") or 0) + 1
+        entry["cold_streak"] = streak
+        entry["cold_until"] = max(int(entry.get("cold_until") or 0), now + 86400)
+        if streak >= 2:
+            entry["penalty_until"] = now + 259200
+        _proactive_store[key] = entry
+        _save_proactive()
+        return "cold"
+    # 短回复最多算"中性"：不清零惩罚、也不惩罚（no_reply_streak 已在上面清零不影响）
+    return "neutral"
+
 
 def _char_share_boost(char_id: str) -> float:
     """角色人设里带"活泼/外向/爱分享"倾向 → 主动分享概率加成"""
@@ -254,6 +441,7 @@ __all__ = [
     "_init_relation",
     "_is_clumsy_char",
     "_is_night",
+    "_proactive_daily_cap",
     "_proactive_day_prob",
     "_proactive_night_prob",
     "_register_schedule",
@@ -266,5 +454,11 @@ __all__ = [
     "_save_relations",
     "_save_schedules",
     "char_mgr",
+    "is_school_holiday",
     "mem_mgr",
+    "note_proactive_reply",
+    "persona_busy_now",
+    "persona_occupation",
+    "reset_no_reply_streak",
+    "strip_graduated",
 ]

@@ -97,15 +97,40 @@ class DocumentParser:
     
     @staticmethod
     def _parse_text(file_path: str) -> str:
-        """解析纯文本/Markdown"""
-        # 尝试多种编码
-        encodings = ["utf-8", "gbk", "gb2312", "latin-1"]
+        """解析纯文本/Markdown。
+
+        编码顺序有讲究：
+          1. utf-8-sig —— 先吃 Windows 记事本/PowerShell 写的 BOM，否则 BOM 会变成正文第一个字符
+          2. utf-8
+          3. gb18030 —— GBK/GB2312 的超集（生僻字、繁体都能覆盖），比单独试 gbk 更稳
+          4. latin-1 —— 永远能成功，但**极可能是乱码**，命中时打警告，方便排查
+        """
+        encodings = ["utf-8-sig", "utf-8", "gb18030", "latin-1"]
         for enc in encodings:
             try:
                 with open(file_path, "r", encoding=enc) as f:
-                    return f.read()
+                    text = f.read()
             except UnicodeDecodeError:
                 continue
+            except OSError as exc:
+                try:
+                    from loguru import logger
+                    logger.warning(f"[RAG] 读取失败 {file_path}: {exc}")
+                except Exception:
+                    pass
+                return ""
+            if enc == "latin-1":
+                # latin-1 是兜底，不可能是"正确"的编码；文本里出现大量高位字符就是乱码信号
+                suspicious = sum(1 for ch in text[:400] if "\u00c0" <= ch <= "\u00ff")
+                if suspicious > 20:
+                    try:
+                        from loguru import logger
+                        logger.warning(
+                            f"[RAG] {file_path} 只能用 latin-1 解码（疑似乱码），"
+                            f"建议确认源文件编码；已按原样入库")
+                    except Exception:
+                        pass
+            return text
         return ""
     
     @staticmethod

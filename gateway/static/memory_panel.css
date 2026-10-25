@@ -1,0 +1,629 @@
+/* ============================================================================
+ * 栖语 · 记忆面板（memory_panel.css）
+ * 独立样式文件，由 memory_panel.js 挂载的 .mp-root 子树专用。
+ *
+ * 约定：
+ *   1) 颜色 / 圆角 / 毛玻璃阴影全部取 index.html 里 :root 已有的变量
+ *      （--primary、--text-*、--bg-*、--border、--radius-*、--liquid-*、--shadow*），
+ *      不新增任何主题色，明暗两套主题自动跟随。
+ *   2) 所有选择器都以 .mp- 前缀开头，不与 index.html 现有类冲突。
+ *   3) 侧栏默认宽 300px，布局按 300px 设计（勾选框 + 两行正文 + hover 删除）。
+ * ========================================================================== */
+
+/* ---------- 根容器：撑满侧栏，三段式（头 / 列表 / 底部） ---------- */
+.mp-root {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    height: 100%;
+    width: 100%;
+    font-family: var(--font-sans);
+    color: var(--text-primary);
+}
+
+/* ---------- 头部：标题 + 条数 + 操作 ---------- */
+.mp-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 14px 14px 10px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.mp-title-wrap {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+}
+
+.mp-title {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: .2px;
+}
+
+.mp-total {
+    font-size: 0.68rem;
+    font-weight: 700;
+    color: var(--text-tertiary);
+    background: var(--bg-active);
+    border-radius: 999px;
+    padding: 1px 7px;
+    line-height: 1.6;
+}
+
+.mp-actions {
+    display: flex;
+    align-items: center;
+    gap: 1px;
+    flex-shrink: 0;
+}
+
+/* 头部小按钮：轻量、hover 才显形 */
+.mp-icon-btn {
+    border: none;
+    background: transparent;
+    color: var(--text-tertiary);
+    font-family: inherit;
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1.2;
+    padding: 5px 7px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: var(--transition);
+}
+
+.mp-icon-btn:hover:not(:disabled) {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.mp-icon-btn:disabled {
+    opacity: .4;
+    cursor: not-allowed;
+}
+
+.mp-icon-btn.is-danger:hover:not(:disabled) {
+    color: var(--danger);
+}
+
+/* 刷新中：图标转起来（文字图标也能转，够用） */
+.mp-icon-btn.is-spinning {
+    animation: mp-spin .9s linear infinite;
+    color: var(--text-secondary);
+}
+
+@keyframes mp-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* ---------- 搜索框 ---------- */
+.mp-search-wrap {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 14px 6px;
+    flex-shrink: 0;
+}
+
+.mp-search {
+    flex: 1;
+    min-width: 0;
+    padding: 7px 12px;
+    font-size: 0.8rem;
+    font-family: inherit;
+    color: var(--text-primary);
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    outline: none;
+    transition: var(--transition);
+}
+
+.mp-search::placeholder { color: var(--text-muted); }
+
+.mp-search:focus {
+    border-color: var(--border-focus);
+    box-shadow: 0 0 0 3px var(--primary-glow);
+}
+
+.mp-search-clear {
+    flex: 0 0 auto;
+    width: 24px;
+    height: 24px;
+    border: none;
+    background: var(--bg-active);
+    color: var(--text-secondary);
+    border-radius: 50%;
+    font-size: 0.8rem;
+    line-height: 1;
+    cursor: pointer;
+    transition: var(--transition);
+}
+
+.mp-search-clear:hover {
+    background: var(--bg-hover);
+    color: var(--danger);
+}
+
+/* ---------- 列表：唯一滚动区域 ---------- */
+.mp-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 2px 12px 10px;
+}
+
+/* ---------- 分组 ---------- */
+.mp-group { margin-top: 8px; }
+
+.mp-group-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 5px 6px;
+    border: none;
+    background: transparent;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    transition: var(--transition);
+}
+
+.mp-group-head:hover { background: var(--bg-hover); }
+
+.mp-chev {
+    flex: 0 0 auto;
+    width: 9px;
+    font-size: 0.58rem;
+    color: var(--text-tertiary);
+    transition: transform .2s ease;
+    transform: rotate(0deg);
+}
+
+.mp-group.is-collapsed .mp-chev { transform: rotate(-90deg); }
+
+.mp-group-label {
+    flex: 0 0 auto;
+    font-size: 0.76rem;
+    font-weight: 700;
+    color: var(--text-secondary);
+    letter-spacing: .3px;
+}
+
+.mp-group-hint {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.66rem;
+    font-weight: 400;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.mp-badge {
+    flex: 0 0 auto;
+    min-width: 20px;
+    padding: 1px 6px;
+    text-align: center;
+    font-size: 0.64rem;
+    font-weight: 700;
+    color: var(--text-secondary);
+    background: var(--bg-active);
+    border-radius: 999px;
+    line-height: 1.6;
+}
+
+.mp-group-body {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-top: 4px;
+}
+
+.mp-group.is-collapsed .mp-group-body { display: none; }
+
+/* ---------- 单条记忆 ---------- */
+.mp-item {
+    position: relative;
+    display: flex;
+    gap: 8px;
+    padding: 9px 10px 8px;
+    border-radius: var(--radius-md);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    transition: var(--transition);
+}
+
+.mp-item:hover {
+    background: var(--bg-hover);
+    box-shadow: var(--shadow-sm);
+}
+
+.mp-item.is-selected {
+    border-color: var(--text-tertiary);
+    box-shadow: 0 0 0 2px var(--primary-glow);
+}
+
+.mp-item.is-note {
+    background: var(--liquid-bg);
+    border: var(--liquid-border);
+}
+
+.mp-check {
+    flex: 0 0 auto;
+    width: 14px;
+    height: 14px;
+    margin: 2px 0 0 0;
+    accent-color: var(--primary);
+    cursor: pointer;
+}
+
+.mp-main {
+    flex: 1;
+    min-width: 0;
+    cursor: pointer;
+}
+
+/* 正文：默认两行截断，展开后完整显示 */
+.mp-text {
+    font-size: 0.8rem;
+    line-height: 1.5;
+    color: var(--text-primary);
+    word-break: break-word;
+    white-space: pre-wrap;
+    padding-right: 20px;    /* 给右上角删除按钮让位 */
+}
+
+.mp-text.is-clamped {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+/* 搜索命中高亮：只用主题变量（浅色=黑字加底色，深色=白字加底色） */
+.mp-mark {
+    background: var(--primary-glow);
+    color: var(--primary);
+    font-weight: 700;
+    border-radius: 3px;
+    padding: 0 1px;
+    box-shadow: inset 0 -1px 0 var(--primary);
+}
+
+.mp-more {
+    display: inline-block;
+    margin-top: 3px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--primary);
+    font-family: inherit;
+    font-size: 0.67rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.mp-more:hover { text-decoration: underline; }
+
+.mp-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 4px;
+    font-size: 0.66rem;
+    color: var(--text-muted);
+}
+
+.mp-weight {
+    font-size: 0.62rem;
+    font-weight: 700;
+    padding: 0 5px;
+    border-radius: 999px;
+    border: 1px solid currentColor;
+    line-height: 1.6;
+}
+
+.mp-weight.is-high { color: var(--danger); }
+.mp-weight.is-mid  { color: var(--warning); }
+.mp-weight.is-low  { color: var(--text-muted); }
+
+.mp-tag {
+    font-size: 0.62rem;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: var(--bg-active);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+}
+
+/* ---------- 展开后的详情（metadata） ---------- */
+.mp-detail {
+    display: none;
+    margin-top: 7px;
+    padding-top: 7px;
+    border-top: 1px dashed var(--border);
+    font-size: 0.68rem;
+    color: var(--text-secondary);
+}
+
+.mp-item.is-open .mp-detail { display: block; }
+
+.mp-kv {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 3px;
+    line-height: 1.5;
+}
+
+.mp-kv-key {
+    flex: 0 0 46px;
+    color: var(--text-muted);
+}
+
+.mp-kv-val {
+    min-width: 0;
+    word-break: break-word;
+}
+
+.mp-kv-val .mp-tag { margin-right: 4px; }
+
+/* ---------- hover 才出现的删除按钮 ---------- */
+.mp-del {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 22px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 0.95rem;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0;
+    transition: var(--transition);
+}
+
+.mp-item:hover .mp-del,
+.mp-item:focus-within .mp-del,
+.mp-item.is-open .mp-del { opacity: 1; }
+
+.mp-del:hover {
+    color: var(--danger);
+    background: var(--bg-active);
+}
+
+/* 触屏没有 hover，直接常显 */
+@media (hover: none) {
+    .mp-del { opacity: 1; }
+}
+
+/* ---------- 分页（顶部常驻一条，列表底部一条） ---------- */
+.mp-pager {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 6px 4px;
+    font-size: 0.68rem;
+    color: var(--text-tertiary);
+}
+
+.mp-pager-top {
+    flex-shrink: 0;
+    margin: 0 12px 4px;
+    padding: 4px 6px;
+    background: var(--liquid-bg);
+    border: var(--liquid-border);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--liquid-highlight);
+}
+
+.mp-pager-bottom {
+    margin-top: 8px;
+    border-top: 1px dashed var(--border);
+}
+
+/* ---------- 空态 / 加载态 / 错误态 ---------- */
+.mp-state {
+    padding: 34px 16px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    line-height: 1.65;
+}
+
+.mp-state-title {
+    font-size: 0.84rem;
+    font-weight: 700;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+}
+
+.mp-state-hint {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    word-break: break-word;
+}
+
+.mp-state-actions {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 12px;
+    flex-wrap: wrap;
+}
+
+.mp-spinner {
+    width: 18px;
+    height: 18px;
+    margin: 0 auto 10px;
+    border: 2px solid var(--border);
+    border-top-color: var(--text-secondary);
+    border-radius: 50%;
+    animation: mp-spin .8s linear infinite;
+}
+
+/* 加载骨架：3 条模拟条目，避免白屏突兀 */
+.mp-skeleton {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 4px 2px;
+}
+
+.mp-skeleton-row {
+    height: 42px;
+    border-radius: var(--radius-md);
+    background: var(--bg-hover);
+    border: 1px solid var(--border);
+    animation: mp-pulse 1.4s ease-in-out infinite;
+}
+
+.mp-skeleton-row:nth-child(2) { animation-delay: .15s; }
+.mp-skeleton-row:nth-child(3) { animation-delay: .3s; }
+
+@keyframes mp-pulse {
+    0%, 100% { opacity: .55; }
+    50% { opacity: 1; }
+}
+
+/* ---------- 底部：新增记忆 + 生成摘要 ---------- */
+.mp-add {
+    flex-shrink: 0;
+    padding: 10px 12px 12px;
+    border-top: 1px solid var(--border);
+}
+
+.mp-add-input {
+    width: 100%;
+    min-height: 52px;
+    max-height: 120px;
+    resize: vertical;
+    padding: 8px 10px;
+    font-family: inherit;
+    font-size: 0.78rem;
+    line-height: 1.5;
+    color: var(--text-primary);
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    outline: none;
+    transition: var(--transition);
+}
+
+.mp-add-input::placeholder { color: var(--text-muted); }
+
+.mp-add-input:focus {
+    border-color: var(--border-focus);
+    box-shadow: 0 0 0 3px var(--primary-glow);
+}
+
+.mp-add-row {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+}
+
+/* 复用全局 .btn 的按钮：这里只压扁尺寸，颜色仍由 .btn-secondary / .btn-ghost 决定 */
+.mp-add-row > .btn {
+    flex: 1;
+    padding: 6px 8px;
+    font-size: 0.75rem;
+    border-radius: var(--radius-sm);
+}
+
+/* ---------- 底部：多选导出条（有勾选时才出现） ---------- */
+.mp-selbar {
+    flex-shrink: 0;
+    padding: 9px 12px 10px;
+    border-top: 1px solid var(--border);
+    background: var(--liquid-bg);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.mp-selbar-top {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.mp-sel-count {
+    flex: 0 0 auto;
+    font-size: 0.74rem;
+    color: var(--text-secondary);
+}
+
+.mp-sel-count b {
+    color: var(--text-primary);
+    font-weight: 700;
+}
+
+.mp-selbar .btn {
+    flex: 1;
+    padding: 6px 8px;
+    font-size: 0.75rem;
+    border-radius: var(--radius-sm);
+}
+
+.mp-sel-hint {
+    font-size: 0.65rem;
+    line-height: 1.45;
+    color: var(--text-muted);
+}
+
+.mp-sel-hint b {
+    color: var(--warning);
+    font-weight: 700;
+}
+
+/* ---------- 面板内联提示（宿主没有 app.toast 时的兜底） ---------- */
+.mp-tip {
+    position: absolute;
+    left: 10px;
+    right: 10px;
+    bottom: 10px;
+    z-index: 5;
+    padding: 8px 10px;
+    font-size: 0.72rem;
+    line-height: 1.45;
+    color: var(--text-secondary);
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow);
+    animation: mp-slide-in .18s ease;
+}
+
+.mp-tip.is-error { color: var(--danger); }
+.mp-tip.is-success { color: var(--success); }
+
+@keyframes mp-slide-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ---------- 显隐工具 ---------- */
+.mp-hidden { display: none !important; }

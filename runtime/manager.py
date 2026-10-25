@@ -118,6 +118,10 @@ class RuntimeManager:
             except Exception:
                 plan = []
         omni = getattr(self._realtime, "_runtime", None)
+        if not hasattr(omni, "model_dir"):
+            # llama.cpp 后端的 _runtime 是字符串标签（"llama_cpp"/"none"），不是 omni 加载器；
+            # 直接取 .model_dir 会 AttributeError，导致 /v1/runtime/status 整页 500。
+            omni = None
         _rt = getattr(self._realtime, "_runtime", "") if self._realtime else ""
         if not isinstance(_rt, str):
             # omni 后端的 _runtime 是加载器对象：只上报字符串标签，绝不把对象塞进状态

@@ -13,6 +13,7 @@ import json
 import re
 import uuid
 import asyncio
+import contextlib
 import random
 import threading
 import time
@@ -31,6 +32,15 @@ else:
     _ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(_ROOT))
 
+# Windows 下强制 Selector 事件循环：服务器版实测 Proactor 与本项目运行时
+# （torch/llama/onnx 后台任务等）组合会让 uvicorn 监听 socket 不派发请求，
+# 页面/API 全部超时（「启动了但打不开」）；切到 Selector 后恢复。
+if sys.platform == "win32":
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except Exception:
+        pass
+
 # 加载 .env（若存在），使 LLM/Letta 等配置可在部署时覆盖
 try:
     from dotenv import load_dotenv
@@ -38,7 +48,7 @@ try:
 except Exception:
     pass
 
-from fastapi import FastAPI, HTTPException, Header, Request, UploadFile, File
+from fastapi import FastAPI, HTTPException, Header, Request, UploadFile, File, Query
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -50,7 +60,7 @@ from gateway.router import get_router, IntentType
 from rag import get_rag_manager
 from wechat import get_wechat_bot, ITCHAT_AVAILABLE
 from channels import (ClawBotChannel, WechatyChannel,
-                      WechatautoChannel, build_placeholder_channels)
+                      build_placeholder_channels)
 from channels import store as channel_store
 
 # M1：行为 / 状态 / LLM 逻辑已拆分到 companion/ 包
@@ -63,6 +73,17 @@ import companion.emotions as companion_emotions
 import companion.settings as companion_settings
 import companion.llm as companion_llm
 from companion.pipeline import pending_queue
+
+# 认知模式（角色扮演 / 驻留智能体）：字段落在 persona_params["cognition_mode"]。
+# 老角色文件没有这个字段 → 读作 roleplay；这里 import 失败也不能挡住主链路。
+try:
+    from characters.cognition import VALID_MODES as COGNITION_MODES
+    from characters.cognition import get_cognition_mode
+except Exception as _cog_import_err:  # pragma: no cover - 兜底，正常不会走到
+    COGNITION_MODES = ("roleplay", "resident")
+
+    def get_cognition_mode(_char=None) -> str:  # type: ignore[misc]
+        return "roleplay"
 """
 栖语 (Qiyu) - 完整版 Demo 启动器
 =================================
@@ -124,7 +145,7 @@ from memory import get_memory_manager, get_knowledge_base
 from rag import get_rag_manager
 from wechat import get_wechat_bot, ITCHAT_AVAILABLE
 from channels import (get_channel_registry, ClawBotChannel, WechatyChannel,
-                      WechatautoChannel, build_placeholder_channels)
+                      build_placeholder_channels)
 from channels import store as channel_store
 from channels.wechat_emoji import build_emoji_prompt_block
 from letta_backend import get_letta_backend
@@ -132,7 +153,16 @@ from tools import web as web_tools
 
 # Demo 配置（桌面壳可通过环境变量覆盖 host/port）
 DEMO_PORT = int(os.getenv("QIYU_PORT", "8765"))
-DEMO_HOST = os.getenv("QIYU_HOST", "0.0.0.0")
+# 默认只监听本机：接口无鉴权，绑 0.0.0.0 会让局域网任何人读聊天记录、改设置。
+# 确需手机/局域网访问时显式设 QIYU_HOST=0.0.0.0（自担风险）
+DEMO_HOST = os.getenv("QIYU_HOST", "127.0.0.1")
+# 允许的浏览器来源：桌面壳/本机页面。接口没有登录态，不能让任意网页跨站读写。
+ALLOWED_ORIGINS = [
+    f"http://127.0.0.1:{DEMO_PORT}",
+    f"http://localhost:{DEMO_PORT}",
+]
+# 设置页回显 api_key 用的占位符：GET 不回传明文，前端原样提交占位符视为「不修改」
+API_KEY_MASK = "********"
 LLM_URL = os.getenv("LLM_BASE_URL", "http://192.168.2.6:8081/v1")
 LLM_MODEL = os.getenv("LLM_MODEL", "qwen3.6-35b-a3b-uncensored-heretic")
 # 路由模型（可选）：专门用于生成角色信息卡，配置后主对话模型只会看到信息卡、看不到人设标签
@@ -216,11 +246,25 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def guard_cross_origin_writes(request, call_next):
+    """没有登录态的本机接口：带 Origin 的跨站写请求一律拒绝（防 CSRF）。
+
+    浏览器发起的跨站请求一定带 Origin；curl / 后端子进程不带 Origin，放行。
+    只在非白名单 Origin 时拒绝，避免把本机壳自己的请求也挡掉。
+    """
+    if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        origin = (request.headers.get("origin") or "").strip()
+        if origin and origin not in ALLOWED_ORIGINS:
+            return JSONResponse(status_code=403, content={"detail": "跨站请求被拒绝"})
+    return await call_next(request)
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -265,6 +309,15 @@ class UserChatGate:
 
     def clear_busy(self, user_id: str) -> None:
         self._busy.discard(user_id)
+
+    @contextlib.asynccontextmanager
+    async def busy_scope(self, user_id: str):
+        """进入即标忙、退出必释放（含异常路径）；块内提前 clear_busy 也无妨（discard 幂等）"""
+        self.mark_busy(user_id)
+        try:
+            yield
+        finally:
+            self.clear_busy(user_id)
 
 
 chat_gate = UserChatGate()
@@ -492,66 +545,69 @@ async def startup():
             logger.info(f"[合批] {user_id} 上一条回复生成中，微信消息进 pending 队列")
             return "", []
         chat_gate.mark_busy(user_id)
-        mem_mgr.add_message(user_id, "user", mem_content, char_id, images=images)
-        # 微信消息即时同步到 App 前端（不等模型生成完，先显示用户这条）
-        _push_event(user_id, {
-            "type": "chat_user",
-            "user_id": user_id,
-            "char_id": char_id,
-            "text": mem_content,
-            "images": images,
-            "ts": time.time(),
-        })
-        if user_id != "web_user":
-            _push_event("web_user", dict(user_id=user_id, char_id=char_id,
-                                         type="chat_user", text=mem_content,
-                                         images=images, ts=time.time()))
-
-        # 3) 构造消息（图片 → OpenAI 视觉输入格式，交给远端 llama.cpp 多模态）
-        if images:
-            parts = [{"type": "text", "text": content}]
-            for img in images[:4]:
-                url = img
-                if isinstance(url, str) and not url.startswith("data:") and not url.startswith("http"):
-                    url = f"data:image/png;base64,{url}"
-                parts.append({"type": "image_url", "image_url": {"url": url}})
-            messages = [{"role": "user", "content": parts}]
-        else:
-            messages = [{"role": "user", "content": content}]
-
-        # 4) 生成回复（前后端同步「对方正在输入」：微信端由通道 sendtyping 驱动，
-        #    这里同时给 App 前端推 typing 事件，让两端的输入指示器一起亮）
-        _push_event(user_id, {"type": "typing", "user_id": user_id, "char_id": char_id})
         try:
-            reply, pieces = await llm_client.chat(char_id, messages, user_id=user_id, channel=channel)
-        except Exception:
-            chat_gate.clear_busy(user_id)
-            raise
-        finally:
-            _push_event(user_id, {"type": "typing_stop", "user_id": user_id, "char_id": char_id})
+            mem_mgr.add_message(user_id, "user", mem_content, char_id, images=images)
+            # 微信消息即时同步到 App 前端（不等模型生成完，先显示用户这条）
+            _push_event(user_id, {
+                "type": "chat_user",
+                "user_id": user_id,
+                "char_id": char_id,
+                "text": mem_content,
+                "images": images,
+                "ts": time.time(),
+            })
+            if user_id != "web_user":
+                _push_event("web_user", dict(user_id=user_id, char_id=char_id,
+                                             type="chat_user", text=mem_content,
+                                             images=images, ts=time.time()))
 
-        # 5) 保存助手回复到记忆
-        mem_mgr.add_message(user_id, "assistant", reply, char_id, pieces=pieces)
-        # 触发记忆流水线（切回主事件循环，避免微信线程的临时 loop 关闭）
-        if main_loop and not main_loop.is_closed():
-            asyncio.run_coroutine_threadsafe(_run_memory_pipeline(user_id, char_id), main_loop)
-        # 6) 前端同步：微信收到的消息与回复实时推给 App 前端（会话选择器正在看该会话时自动刷新；
-        #    同时广播一份给 web_user，让前端无论在看哪个会话都能刷新会话列表并提示）
-        ev = {
-            "type": "chat_sync",
-            "user_id": user_id,
-            "char_id": char_id,
-            "user_text": mem_content,
-            "user_images": images,
-            "assistant_text": reply,
-            "pieces": pieces,
-            "ts": time.time(),
-            "notify": True,
-        }
-        _push_event(user_id, ev)
-        if user_id != "web_user":
-            _push_event("web_user", dict(ev, notify=True))
-        chat_gate.clear_busy(user_id)
+            # 3) 构造消息（图片 → OpenAI 视觉输入格式，交给远端 llama.cpp 多模态）
+            if images:
+                parts = [{"type": "text", "text": content}]
+                for img in images[:4]:
+                    url = img
+                    if isinstance(url, str) and not url.startswith("data:") and not url.startswith("http"):
+                        url = f"data:image/png;base64,{url}"
+                    parts.append({"type": "image_url", "image_url": {"url": url}})
+                messages = [{"role": "user", "content": parts}]
+            else:
+                messages = [{"role": "user", "content": content}]
+
+            # 4) 生成回复（前后端同步「对方正在输入」：微信端由通道 sendtyping 驱动，
+            #    这里同时给 App 前端推 typing 事件，让两端的输入指示器一起亮）
+            _push_event(user_id, {"type": "typing", "user_id": user_id, "char_id": char_id})
+            try:
+                reply, pieces = await llm_client.chat(char_id, messages, user_id=user_id, channel=channel)
+            except Exception:
+                chat_gate.clear_busy(user_id)
+                raise
+            finally:
+                _push_event(user_id, {"type": "typing_stop", "user_id": user_id, "char_id": char_id})
+
+            # 5) 保存助手回复到记忆
+            mem_mgr.add_message(user_id, "assistant", reply, char_id, pieces=pieces)
+            # 触发记忆流水线（切回主事件循环，避免微信线程的临时 loop 关闭）
+            if main_loop and not main_loop.is_closed():
+                asyncio.run_coroutine_threadsafe(_run_memory_pipeline(user_id, char_id), main_loop)
+            # 6) 前端同步：微信收到的消息与回复实时推给 App 前端（会话选择器正在看该会话时自动刷新；
+            #    同时广播一份给 web_user，让前端无论在看哪个会话都能刷新会话列表并提示）
+            ev = {
+                "type": "chat_sync",
+                "user_id": user_id,
+                "char_id": char_id,
+                "user_text": mem_content,
+                "user_images": images,
+                "assistant_text": reply,
+                "pieces": pieces,
+                "ts": time.time(),
+                "notify": True,
+            }
+            _push_event(user_id, ev)
+            if user_id != "web_user":
+                _push_event("web_user", dict(ev, notify=True))
+        finally:
+            # 任何一步抛异常都要释放忙标志，否则该用户之后的消息全进 pending、永远不回
+            chat_gate.clear_busy(user_id)
         while pending_queue.pending(user_id):
             try:
                 await _handle_pending_batch(user_id, char_id, float(st.get("temperature") or 0.7))
@@ -579,27 +635,46 @@ async def startup():
     
     wechat_bot.set_message_handler(handle_wechat_msg)
 
-    # 外部通讯通道注册：ClawBot（官方扫码，默认置顶）+ Wechatauto（本机接管，读取被动/发送低干扰）
-    # + Wechaty（Node 网关单账号接管，备用）+ 预留通道
+    # 外部通讯通道注册（2026-10 调整）：
+    #   ClawBot（官方扫码）；Wechatauto 本机接管已下线（封号风险，不再注册）
+    #   企业微信 / QQ Bot / 飞书 —— 三个预留通道已按 OpenClaw 抽象真正实现（发送链路接通，
+    #   接收需要用户配回调/事件订阅），凭证在设置页填。
+    #   Wechaty 已下线（文件保留，便于后续单独部署一个版本时再挂回来）。
     channel_registry.register(ClawBotChannel("main"))
-    channel_registry.register(WechatautoChannel())
-    wechaty_ch = WechatyChannel(callback_url=f"http://127.0.0.1:{DEMO_PORT}/v1/channels/wechaty/webhook")
-    channel_registry.register(wechaty_ch)
-    for _ph in build_placeholder_channels():
-        channel_registry.register(_ph)
+    try:
+        from channels import WeComChannel, QQBotChannel, FeishuChannel
+        channel_registry.register(WeComChannel())
+        channel_registry.register(QQBotChannel())
+        channel_registry.register(FeishuChannel())
+    except Exception as _ch_err:
+        logger.warning(f"[通道] 企业微信/QQBot/飞书 注册失败（已跳过）: {_ch_err}")
     channel_registry.set_message_handler(handle_wechat_msg)
 
     global main_loop, _background_task
     main_loop = asyncio.get_running_loop()
     # 后台调度：建议追问 + 每日不定时主动消息
     _background_task = asyncio.create_task(_background_loop())
+
+    # Embedding 模型后台预热：不阻塞 startup（否则冷启动要多等 10–20 秒）。
+    # 用户点开网页时服务已经就绪，模型在后台加载；第一次聊天若还没加载完，
+    # encode() 会等 _ensure_loaded() 的锁（最多一次）。
+    async def _warmup_embedding():
+        try:
+            import asyncio as _aio
+            from embedding.service import EmbeddingService
+            ok = await _aio.to_thread(EmbeddingService().warmup)
+            logger.info(f"[预热] Embedding 模型{'就绪' if ok else '加载失败（聊天时会再试）'}")
+        except Exception as _w_err:
+            logger.warning(f"[预热] Embedding 跳过: {_w_err}")
+
+    asyncio.create_task(_warmup_embedding())
     
     logger.info("=" * 60)
     logger.info("栖语 完整版启动")
     logger.info("=" * 60)
     logger.info(f"访问地址: http://{DEMO_HOST}:{DEMO_PORT}")
     logger.info(f"LLM 服务: {'已连接' if llm_client.available else '未连接 - 请检查设置'}")
-    logger.info(f"微信模块: Wechaty {'可用' if wechaty_ch.available else '未就绪（需 Node + wechaty 依赖）'} / ClawBot 可用")
+    logger.info("外部通道: ClawBot / 企业微信 / QQ Bot / 飞书（Wechatauto 已下线，Wechaty 未注册）")
     logger.info(f"RAG 监控: {kb.storage_dir}")
     logger.info("=" * 60)
 
@@ -644,6 +719,67 @@ async def get_character(char_id: str):
         "avatar_color": char.avatar_color, "avatar": char.avatar, "keywords": char.keywords or [],
         "speech_style": char.speech_style, "resume": char.resume or {},
         "persona_params": char.persona_params or {},
+        # 当前生效的认知模式（roleplay / resident）：老角色没有 persona_params.cognition_mode，
+        # 这里回的是生效值 roleplay，前端不用自己判断缺省。
+        "cognition_mode": get_cognition_mode(char),
+    }
+
+
+@app.patch("/v1/characters/{char_id}")
+async def patch_character(char_id: str, data: dict):
+    """局部更新角色：只改传进来的键，其它字段保持原值（POST /v1/characters 是整体 upsert）。
+
+    主要给「认知模式」这类 persona_params 开关用：persona_params 做**浅合并**，
+    不会把已有的 MBTI / 好感度 / 关系定位等参数冲掉。
+    persona_params 里某个键传 null 或空串 = 删掉该键（回退默认，例如认知模式回到 roleplay）。
+    """
+    char = char_mgr.get_character(char_id)
+    if not char:
+        raise HTTPException(404, "角色不存在")
+
+    patch: dict = {}
+    for key, value in (data or {}).items():
+        if key == "id":
+            continue
+        if key == "persona_params":
+            if not isinstance(value, dict):
+                raise HTTPException(400, "persona_params 必须是对象")
+            merged = dict(getattr(char, "persona_params", None) or {})
+            for pk, pv in value.items():
+                if pk == "cognition_mode":
+                    raw = "" if pv is None else str(pv).strip().lower()
+                    if raw in ("", "default", "follow", "follow_default", "auto", "none", "null"):
+                        merged.pop(pk, None)  # 跟随默认：删键，不要写 空字符串 进角色文件
+                    elif raw in COGNITION_MODES:
+                        merged[pk] = raw
+                    else:
+                        raise HTTPException(
+                            400, f"cognition_mode 只能是 {' / '.join(COGNITION_MODES)}（收到 {pv!r}）")
+                    continue
+                if pv is None or (isinstance(pv, str) and not pv.strip()):
+                    merged.pop(pk, None)
+                else:
+                    merged[pk] = pv
+            patch["persona_params"] = merged
+        elif hasattr(char, key):
+            patch[key] = value
+    if not patch:
+        raise HTTPException(400, "没有可更新的字段")
+
+    updated = char_mgr.update_character(char_id, patch)
+    if not updated:
+        raise HTTPException(404, "角色不存在")
+    return {
+        "success": True,
+        "cognition_mode": get_cognition_mode(updated),
+        "character": {
+            "id": updated.id, "name": updated.name, "tagline": updated.tagline,
+            "description": updated.description, "temperature": updated.temperature,
+            "avatar_color": updated.avatar_color, "avatar": updated.avatar,
+            "keywords": updated.keywords or [], "speech_style": updated.speech_style,
+            "resume": updated.resume or {}, "persona_params": updated.persona_params or {},
+            "cognition_mode": get_cognition_mode(updated),
+        },
     }
 
 
@@ -691,6 +827,90 @@ async def select_character(data: dict):
         "message": f"已切换为「{char.name}」— {char.tagline}",
     }
 
+# ============ QY3 单文件角色包（桌面版：不加密）============
+
+@app.get("/v1/characters/{char_id}/export.qy3")
+async def export_character_qy3(char_id: str, days: int = 30):
+    """导出 .qy3f（v1 不加密容器）：人设 + 记忆 + 最近 30 天事件 + 知识库 + 世界状态一起带走。
+
+    days 只管"当天事件"往回带多少天（默认 30）；知识库与世界状态不受它影响。
+    """
+    import tempfile
+    import uuid
+
+    from characters.qy3 import QY3Error, export_role
+    char = char_mgr.get_character(char_id)
+    if not char:
+        raise HTTPException(404, "角色不存在")
+    export_dir = Path(tempfile.gettempdir()) / "qiyu_qy3"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    path = export_dir / f"{char_id}_{uuid.uuid4().hex[:8]}.qy3f"
+    try:
+        export_role(char_id, path, days=max(1, min(3650, int(days or 30))))
+    except QY3Error as exc:
+        raise HTTPException(400, f"{exc.code}: {exc}") from exc
+    return FileResponse(str(path), media_type="application/octet-stream",
+                        filename=f"{char.name}_{char_id}.qy3f")
+
+
+@app.post("/v1/characters/qy3/import")
+async def import_character_qy3(data: dict):
+    """从 .qy3f 导入（base64 上传）。replace=False 时同名角色自动改名，不覆盖。
+
+    包里带的知识库切片会写回 RAG 存储；写不进去时回 `knowledge_skipped: N`（不假装成功）。
+    `restore_world_state=false` 可以只导角色/记忆，不碰关系与情绪。
+    """
+    import base64 as _b64
+    import tempfile
+    import uuid
+
+    from characters.qy3 import QY3Error, import_role
+    try:
+        raw = _b64.b64decode(str(data.get("data_base64") or ""), validate=True)
+    except Exception as exc:
+        raise HTTPException(400, "data_base64 不是合法 Base64") from exc
+    if len(raw) > 50 * 1024 * 1024:
+        raise HTTPException(413, "QY3 文件不能超过 50MB")
+    tmp = Path(tempfile.gettempdir()) / f"qiyu_import_{uuid.uuid4().hex}.qy3f"
+    try:
+        tmp.write_bytes(raw)
+        result = import_role(tmp, replace=bool(data.get("replace")),
+                             restore_world_state=bool(data.get("restore_world_state", True)))
+    except QY3Error as exc:
+        raise HTTPException(400, f"{exc.code}: {exc}") from exc
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+    return {"success": True, **result}
+
+
+@app.post("/v1/characters/qy3/validate")
+async def validate_character_qy3(data: dict):
+    """只校验不导入：给前端"选文件后先看包里是谁"用。"""
+    import base64 as _b64
+    import tempfile
+    import uuid
+
+    from characters.qy3 import QY3Error, validate_qy3
+    try:
+        raw = _b64.b64decode(str(data.get("data_base64") or ""), validate=True)
+    except Exception as exc:
+        raise HTTPException(400, "data_base64 不是合法 Base64") from exc
+    tmp = Path(tempfile.gettempdir()) / f"qiyu_validate_{uuid.uuid4().hex}.qy3f"
+    try:
+        tmp.write_bytes(raw)
+        return {"success": True, **validate_qy3(tmp)}
+    except QY3Error as exc:
+        raise HTTPException(400, f"{exc.code}: {exc}") from exc
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 @app.post("/v1/characters/generate")
 async def generate_character(data: dict):
     """根据标签生成结构化角色简历（走路由模型，主对话模型只看到简历）"""
@@ -707,6 +927,9 @@ async def generate_character(data: dict):
         resume = parse_resume(card)
         params = parse_persona_params(card)
         return {"success": True, "card": card, "resume": resume, "params": params}
+    except HTTPException:
+        # 同样保留 503（LLM 未配置），不要包成 500
+        raise
     except Exception as e:
         logger.error(f"生成角色简历失败: {e}")
         raise HTTPException(500, f"生成失败: {str(e)}")
@@ -755,7 +978,8 @@ async def index_character_resume(char_id: str):
         kb_dir.mkdir(parents=True, exist_ok=True)
         fname = kb_dir / f"resume_{char.id}.md"
         fname.write_text(f"# 角色简历：{char.name}\n\n{text}\n", encoding="utf-8")
-        count = kb.index_document(fname)
+        # 按角色入库：检索时只给本角色（+全局）看，A 的简历不再串进 B 的提示词
+        count = kb.index_document(fname, char_id=char.id)
         return {"success": True, "chunks": count, "file": fname.name, "resume": char.resume}
     except Exception as e:
         logger.error(f"角色简历入库失败: {e}")
@@ -847,7 +1071,7 @@ async def chat_completions(request: ChatRequest):
                 yield f"data: {json.dumps({'type': 'queued', 'id': response_id, 'message': '消息已排队，稍后统一回复'})}\n\n"
                 yield "data: [DONE]\n\n"
                 return
-            async with lock:
+            async with lock, chat_gate.busy_scope(user_id):
                 chat_gate.mark_busy(user_id)
                 async def _flush_batch():
                     chat_gate.clear_busy(user_id)
@@ -945,7 +1169,7 @@ async def chat_completions(request: ChatRequest):
                     await _flush_batch()
                     return
                 except Exception as e:
-                    logger.error(f"流式聊天失败: {e}")
+                    logger.exception(f"流式聊天失败: {e}")
                     yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'error'}], 'error': {'message': f'生成失败: {e}'}})}\n\n"
                     await _flush_batch()
                     return
@@ -1009,6 +1233,13 @@ async def chat_completions(request: ChatRequest):
                     safe_pushed = len(parsed["messages"])
                     yield f"data: {json.dumps({'type': 'assistant_messages', 'id': response_id, 'partial': True, 'messages': new_msgs}, ensure_ascii=False)}\n\n"
                 relation = _apply_chat_side_effects(user_id, char_id, parsed, user_content)
+                # 她这轮说了要去睡 → 记睡眠窗口（非流式在 behavior._finalize_chat_reply 里记，网页流式走这里）
+                try:
+                    from companion.sleep import mark_sleep_from_reply
+                    mark_sleep_from_reply(user_id, char_id, "".join(m["text"] for m in parsed["messages"]),
+                                          explicit=bool(parsed.get("sleeping")), reason="聊天里说了要去睡")
+                except Exception as _se:
+                    logger.warning(f"[睡眠] 记录睡眠窗口失败: {_se}")
 
                 # 先回复，后整理：保存纯文本消息（带分条 pieces，历史可还原逐条）+ 异步压缩记忆
                 reply_text = "".join(m["text"] for m in parsed["messages"])
@@ -1041,7 +1272,8 @@ async def chat_completions(request: ChatRequest):
                         pass
                     asyncio.create_task(_run_memory_pipeline(user_id, char_id))
                 else:
-                    mem_mgr.add_message(user_id, "assistant", "(无回复)", char_id)
+                    # 空回复不写历史：写成「(无回复)」会被当成角色台词回喂给模型
+                    logger.warning(f"[聊天] {user_id} {char_id} 本轮空回复，未写入历史")
 
                 # 最终事件：带完整状态/关系/记忆，前端只用来更新状态（消息已在增量里推完）
                 _emo = _emotion_state(user_id, char_id)
@@ -1066,7 +1298,7 @@ async def chat_completions(request: ChatRequest):
                 pending_queue.enqueue(user_id, {"text": _mc, "images": request.images or [], "timestamp": time.time()})
             logger.info(f"[合批] {user_id} 上一条回复生成中，{len(mem_contents)} 条消息进入 pending 队列")
             return JSONResponse(content={"status": "queued", "id": response_id, "message": "消息已排队，稍后统一回复"})
-        async with lock:
+        async with lock, chat_gate.busy_scope(user_id):
             chat_gate.mark_busy(user_id)
             # 用户来消息了：取消追问计划、刷新最后活跃时间、清掉未回复的小情绪
             if user_id in user_states:
@@ -1094,20 +1326,25 @@ async def chat_completions(request: ChatRequest):
                     use_rag=request.use_rag,
                     pending_messages=_pending,
                 )
+            except HTTPException:
+                # LLM 未配置时 llm.py 抛的是 503；别包成 500，否则前端看到「500: 503: …」
+                chat_gate.clear_busy(user_id)
+                raise
             except Exception as e:
                 chat_gate.clear_busy(user_id)
                 raise HTTPException(500, f"生成失败: {e}")
             if reply:
                 mem_mgr.add_message(user_id, "assistant", reply, char_id, pieces=pieces)
+                try:
+                    from runtime.db import unified_store
+                    from runtime.logging_setup import logger_conv
+                    logger_conv.info(f"[{user_id}] {char_id} 助手: {reply[:200]}")
+                    unified_store.record_message(user_id, char_id, "assistant", reply, pieces=pieces)
+                except Exception:
+                    pass
             else:
-                mem_mgr.add_message(user_id, "assistant", "(无回复)", char_id)
-            try:
-                from runtime.db import unified_store
-                from runtime.logging_setup import logger_conv
-                logger_conv.info(f"[{user_id}] {char_id} 助手: {(reply or '(无回复)')[:200]}")
-                unified_store.record_message(user_id, char_id, "assistant", reply or "(无回复)", pieces=pieces)
-            except Exception:
-                pass
+                # 空回复不写历史：写成「(无回复)」会被当成角色台词回喂给模型
+                logger.warning(f"[聊天] {user_id} {char_id} 本轮空回复，未写入历史")
             asyncio.create_task(_run_memory_pipeline(user_id, char_id))
             chat_gate.clear_busy(user_id)
             while pending_queue.pending(user_id):
@@ -1167,7 +1404,8 @@ async def clear_chat_history_api(user_id: str = "web_user", char_id: str = ""):
 
 
 @app.get("/v1/memory/{user_id}")
-async def get_memory(user_id: str, query: str = "", top_k: int = 10, char_id: str = ""):
+async def get_memory(user_id: str, query: str = Query(""), top_k: int = Query(10),
+                     char_id: str = Query("")):
     """获取用户记忆（可传 char_id 只看该角色的隔离记忆库）。
     返回三档：day=当天话题/看法总结（不是逐条聊天记录），short=短期记忆，long=长期记忆。"""
     store = mem_mgr._get_store(user_id, char_id)
@@ -1209,14 +1447,15 @@ async def get_memory(user_id: str, query: str = "", top_k: int = 10, char_id: st
 
 
 @app.post("/v1/memory/{user_id}")
-async def add_memory(user_id: str, data: MemoryAddRequest, char_id: str = ""):
+async def add_memory(user_id: str, data: MemoryAddRequest,
+                     char_id: str = Query("")):
     """添加记忆（传 char_id 时存入该角色的隔离记忆库，只在该角色面板/上下文中生效）"""
     mem_mgr.save_fact(user_id, data.text, {"tags": data.tags or []}, char_id=char_id)
     return {"success": True, "message": "记忆已保存"}
 
 
 @app.delete("/v1/memory/{user_id}/{memory_id}")
-async def delete_memory(user_id: str, memory_id: str, char_id: str = ""):
+async def delete_memory(user_id: str, memory_id: str, char_id: str = Query("")):
     """删除记忆（按角色隔离库定位）"""
     store = mem_mgr._get_store(user_id, char_id)
     if store.delete(memory_id):
@@ -1225,7 +1464,7 @@ async def delete_memory(user_id: str, memory_id: str, char_id: str = ""):
 
 
 @app.post("/v1/memory/{user_id}/clear")
-async def clear_memory(user_id: str, char_id: str = "", scope: str = "day"):
+async def clear_memory(user_id: str, char_id: str = Query(""), scope: str = Query("day")):
     """清空记忆。scope: day=仅当天聊天记录（默认）；short=短期记忆；long=长期记忆；all=全部（含对话历史）"""
     scope = (scope or "day").strip().lower()
     if scope == "day":
@@ -1305,11 +1544,49 @@ async def list_documents():
     return {"data": list(sources.values())}
 
 
+@app.get("/v1/rag/document")
+async def get_document(source: str = ""):
+    """按 source 返回该文档的全部切片（点开文档看内容用）。
+
+    知识库原来只有「列表 + 向量搜索」，没有"按文档看切片"的入口，
+    前端点文档名没有任何反应。这里补上：按 chunk_index 排序返回全文。
+    """
+    source = (source or "").strip()
+    if not source:
+        raise HTTPException(400, "缺少 source")
+    entries = kb.store.list_all(memory_type="knowledge")
+    rows = [e for e in entries if str((e.get("metadata") or {}).get("source") or "") == source]
+
+    def _idx(e):
+        try:
+            return int((e.get("metadata") or {}).get("chunk_index") or 0)
+        except Exception:
+            return 0
+
+    rows.sort(key=_idx)
+    return {
+        "success": True,
+        "source": source,
+        "chunks": len(rows),
+        "data": [{
+            "id": e.get("id"),
+            "text": e.get("text") or "",
+            "chunk_index": _idx(e),
+            "created_at": e.get("created_at"),
+        } for e in rows],
+    }
+
+
 @app.post("/v1/rag/index")
 async def index_document(path: str = ""):
     """手动索引文档"""
     if path:
-        filepath = Path(path)
+        # 只允许索引数据目录内的文件：原来接受任意绝对路径，等于能把本机任意文件
+        # （密钥、文档）读进知识库再经聊天吐出来。前端只用无参的全量索引。
+        filepath = Path(path).resolve()
+        allowed = get_data_dir().resolve()
+        if not filepath.is_relative_to(allowed):
+            raise HTTPException(403, "只能索引数据目录内的文件")
         if filepath.exists():
             count = kb.index_document(filepath)
             return {"success": True, "chunks": count}
@@ -1362,7 +1639,7 @@ async def get_settings():
             "model": runtime.get("llm_model", LLM_MODEL),
             "route_url": runtime.get("llm_route_url") or LLM_ROUTE_URL or runtime.get("llm_url", LLM_URL),
             "route_model": runtime.get("llm_route_model") or LLM_ROUTE_MODEL or runtime.get("llm_model", LLM_MODEL),
-            "api_key": runtime.get("api_key", ""),
+            "api_key": API_KEY_MASK if runtime.get("api_key") else "",
             "default_temperature": runtime.get("default_temperature", 0.7),
         },
         "routes": cfg.routes.get("rules", []),
@@ -1386,8 +1663,8 @@ async def get_settings():
         "user_profile": user_profile,
         "user_location": runtime.get("user_location", ""),
         "user_gender": runtime.get("user_gender", ""),
-        "wechat_available": bool(channel_registry.get("wechaty") and channel_registry.get("wechaty").available),
-        "wechat_running": bool(channel_registry.get("wechaty") and channel_registry.get("wechaty").running),
+        "wechat_available": any(c.get("kind") == "wechat" and c.get("available") for c in channel_registry.list_channels()),
+        "wechat_running": any(c.get("kind") == "wechat" and c.get("running") for c in channel_registry.list_channels()),
         "channels": [c["id"] for c in channel_registry.list_channels()],
     }
 
@@ -1413,7 +1690,7 @@ async def save_settings(data: SaveSettingsRequest):
             settings["llm_route_model"] = data.llm_route_model
             global LLM_ROUTE_MODEL
             LLM_ROUTE_MODEL = data.llm_route_model
-        if data.api_key is not None:
+        if data.api_key is not None and data.api_key != API_KEY_MASK:
             settings["api_key"] = data.api_key
         if data.default_temperature is not None:
             settings["default_temperature"] = data.default_temperature
@@ -1458,6 +1735,22 @@ async def save_settings(data: SaveSettingsRequest):
             settings["user_gender"] = (data.user_gender or "").strip().lower()
         
         save_runtime_settings(settings)
+        # 让新配置立刻生效：同步到 companion 模块并重新探活，不用重启
+        try:
+            import companion.state as _cs
+            import companion.llm as _cl
+            _cs.LLM_URL = LLM_URL
+            _cs.LLM_MODEL = LLM_MODEL
+            _cs.LLM_ROUTE_URL = LLM_ROUTE_URL
+            _cs.LLM_ROUTE_MODEL = LLM_ROUTE_MODEL
+            _cl.LLM_URL = LLM_URL
+            _cl.LLM_MODEL = LLM_MODEL
+            _cl.LLM_ROUTE_URL = LLM_ROUTE_URL
+            _cl.LLM_ROUTE_MODEL = LLM_ROUTE_MODEL
+            if llm_client:
+                llm_client.refresh()
+        except Exception as _e:
+            logger.warning(f"[设置] 同步 LLM 配置失败: {_e}")
         return {"success": True, "message": "设置已保存"}
     except Exception as e:
         raise HTTPException(500, f"保存失败: {str(e)}")
@@ -1466,18 +1759,38 @@ async def save_settings(data: SaveSettingsRequest):
 # ============ LLM 代理 API ============
 
 @app.get("/v1/models")
-async def list_models():
-    """获取可用模型列表"""
+async def list_models(url: str = "", api_key: str = ""):
+    """获取可用模型列表。
+
+    优先用请求里带的 url/api_key（设置页当前填的值），其次读已保存的运行时设置，
+    最后才回落到环境变量。以前只认环境变量 LLM_URL，用户在设置页改了地址再点刷新，
+    实际查的还是老地址——看起来就是"刷新没用、列表永远是旧模型"。
+      1) 上游拿得到 → 用上游的（真实可用）
+      2) 拿不到 → 返回空列表 + `fallback: true` + `error`（**不再编造兜底模型**）
+    """
+    rt = load_runtime_settings()
+    target_url = (url or rt.get("llm_url") or LLM_URL or "").strip().rstrip("/")
+    target_key = (api_key or rt.get("api_key") or os.getenv("LLM_API_KEY", "") or "").strip()
+    if target_key == API_KEY_MASK:
+        target_key = (rt.get("api_key") or "").strip()
+    headers = {"Authorization": f"Bearer {target_key}"} if target_key else {}
+    error = ""
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{LLM_URL}/models")
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.get(f"{target_url}/models", headers=headers)
             resp.raise_for_status()
             data = resp.json()
             models = data.get("data", [])
-            return {"data": [{"id": m.get("id", ""), "name": m.get("id", "")} for m in models]}
+            if models:
+                return {"data": [{"id": m.get("id", ""), "name": m.get("id", "")} for m in models],
+                        "fallback": False, "url": target_url, "error": ""}
+            error = "上游返回了空模型列表"
     except Exception as e:
-        logger.warning(f"获取模型列表失败: {e}")
-        return {"data": [{"id": LLM_MODEL, "name": LLM_MODEL}]}
+        error = f"{type(e).__name__}: {str(e)[:200]}"
+        logger.warning(f"获取模型列表失败: {error}")
+
+    return {"data": [], "fallback": True, "url": target_url,
+            "error": error or "无法连接模型服务"}
 
 
 @app.get("/v1/llm/presets")
@@ -1492,19 +1805,23 @@ async def verify_llm(data: dict):
     url = data.get("url", LLM_URL).rstrip("/")
     model = data.get("model", LLM_MODEL)
     api_key = data.get("api_key", "")
+    if api_key == API_KEY_MASK:
+        api_key = load_runtime_settings().get("api_key", "")
     
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     
-    # 测试1: 检查 /models 接口
+    # 测试1: /models 只作参考——不少本地中枢不实现它（返回 404/405 甚至 401），
+    # 不能因此判"连不上"，真正的判定交给下面的对话请求。
+    models_note = ""
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(f"{url}/models", headers=headers)
             if resp.status_code != 200:
-                return {"success": False, "message": f"/models 接口返回 {resp.status_code}"}
+                models_note = f"/models 返回 {resp.status_code}（不影响对话）；"
     except Exception as e:
-        return {"success": False, "message": f"无法连接到 LLM 服务: {str(e)}"}
+        models_note = f"/models 不可达（{type(e).__name__}），继续试对话；"
     
     # 测试2: 发送一个简单对话请求验证模型可用
     uncensored = False
@@ -1545,7 +1862,7 @@ async def verify_llm(data: dict):
                 resp = await client.post(f"{url}/chat/completions", json=probe_payload, headers=headers)
             if resp.status_code == 200:
                 resp_data = resp.json()
-                reply = (resp_data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+                reply = ((resp_data.get("choices") or [{}])[0].get("message", {}).get("content") or "").strip()
                 refused = any(k in reply for k in ("抱歉", "不能", "无法", "拒绝", "对不起", "作为AI", "不合适", "遵纪守法", "请文明", "文明用语", "不便"))
                 has_profanity = any(k in reply for k in ("操", "靠", "妈的", "他妈的", "fuck", "shit", "tmd", "卧槽", "我艹", "去你", "尼玛", "妈逼", "妈的"))
                 if has_profanity and not refused:
@@ -1596,7 +1913,7 @@ async def verify_llm(data: dict):
             if resp.status_code == 400:
                 vision_note = "该模型不支持图片输入（vision 接口返回 400）"
             elif resp.status_code == 200:
-                vmsg = ((resp.json().get("choices", [{}])[0].get("message", {}).get("content") or "")).strip()
+                vmsg = (((resp.json().get("choices") or [{}])[0].get("message", {}).get("content") or "")).strip()
                 vlow = vmsg.lower()
                 if any(k in vlow for k in ("红", "red", "#ff0000", "颜色")):
                     vision_supported = True
@@ -1621,7 +1938,7 @@ async def verify_llm(data: dict):
     if data.get("model"):
         settings["llm_model"] = str(data["model"])
         globals()["LLM_MODEL"] = settings["llm_model"]
-    if data.get("api_key") is not None:
+    if data.get("api_key") is not None and data.get("api_key") != API_KEY_MASK:
         settings["api_key"] = data.get("api_key") or ""
     if data.get("route_url") is not None:
         settings["llm_route_url"] = str(data.get("route_url") or "").rstrip("/")
@@ -1632,7 +1949,7 @@ async def verify_llm(data: dict):
     save_runtime_settings(settings)
     return {
         "success": True,
-        "message": "LLM 配置验证通过",
+        "message": "LLM 配置验证通过" + (f"（{models_note}）" if models_note else ""),
         "uncensored": uncensored,
         "uncensored_note": uncensored_note,
         "vision_supported": vision_supported,
@@ -1782,6 +2099,34 @@ async def channel_start(channel_id: str, payload: dict | None = None):
     if ok:
         return {"success": True, "message": "已启动，请完成扫码/登录"}
     return {"success": False, "message": ch.qr_message or "启动失败"}
+
+
+@app.post("/v1/channels/{channel_id}/selftest")
+async def channel_selftest(channel_id: str):
+    """通道自检：填完凭证后点一下，真实跑一次"取 token"，验证凭证是否有效。
+
+    只验证凭证、不发消息（不打扰任何人）。企业微信/QQ/飞书三家都有获取
+    access_token 的步骤，这一步通不了，后面发消息一定通不了。
+    """
+    ch = channel_registry.get(channel_id)
+    if not ch:
+        raise HTTPException(404, "通道不存在")
+    if not getattr(ch, "integrated", False):
+        return {"success": False, "message": "该通道还未接入（占位通道）"}
+    if not getattr(ch, "_ready", lambda: True)():
+        return {"success": False, "message": "配置不完整，请先填写必填项"}
+
+    getter = getattr(ch, "_get_token", None)
+    if not callable(getter):
+        return {"success": False, "message": "该通道没有可自检的凭证"}
+    try:
+        import asyncio
+        token = await asyncio.to_thread(getter)
+        return {"success": True,
+                "message": "凭证有效，已成功获取 access_token",
+                "token_preview": (str(token)[:6] + "…") if token else ""}
+    except Exception as exc:
+        return {"success": False, "message": f"自检失败：{exc}"}
 
 
 @app.post("/v1/channels/{channel_id}/stop")
@@ -2063,8 +2408,8 @@ async def health():
         "mode": "full",
         "llm_available": llm_client.available if llm_client else False,
         "characters": len(char_mgr.list_characters()),
-        "wechat_available": bool(channel_registry.get("wechaty") and channel_registry.get("wechaty").available),
-        "wechat_running": bool(channel_registry.get("wechaty") and channel_registry.get("wechaty").running),
+        "wechat_available": any(c.get("kind") == "wechat" and c.get("available") for c in channel_registry.list_channels()),
+        "wechat_running": any(c.get("kind") == "wechat" and c.get("running") for c in channel_registry.list_channels()),
         "channels": [c["id"] for c in channel_registry.list_channels()],
     }
 

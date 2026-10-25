@@ -31,23 +31,48 @@ class EmbeddingService:
     def __init__(self):
         if EmbeddingService._model is not None:
             return
-        
-        logger.info(f"加载 Embedding 模型: {EMBEDDING_MODEL}")
-        logger.info(f"设备: {EMBEDDING_DEVICE}")
-        
+        # 不在构造时加载模型：桌面版启动有 10–20 秒全耗在这里（SentenceTransformer 初始化）。
+        # 改成「第一次真正编码时才加载」，并由 demo.py 的 startup 起一个后台线程预热：
+        #   服务先起来 → 网页能开 → 模型在后台慢慢加载 → 用户第一次聊天时通常已经好了。
+        import threading
+        if getattr(EmbeddingService, "_load_lock", None) is None:
+            EmbeddingService._load_lock = threading.Lock()
+
+    def _ensure_loaded(self):
+        """真正的模型加载（线程安全、只执行一次）。"""
+        if EmbeddingService._model is not None:
+            return
+        with EmbeddingService._load_lock:
+            if EmbeddingService._model is not None:
+                return
+            logger.info(f"加载 Embedding 模型: {EMBEDDING_MODEL}")
+            logger.info(f"设备: {EMBEDDING_DEVICE}")
+            try:
+                EmbeddingService._model = SentenceTransformer(
+                    EMBEDDING_MODEL,
+                    device=EMBEDDING_DEVICE,
+                    # 离线机器无法访问 huggingface：只用本地缓存，不发 HEAD 请求，
+                    # 否则每次加载会重试 5 次、每次 10s 超时，把聊天链路拖死。
+                    local_files_only=True,
+                )
+                logger.success("Embedding 模型加载完成")
+                logger.info(f"维度: {EMBEDDING_DIMENSION}")
+            except Exception as e:
+                logger.error(f"加载 Embedding 模型失败: {e}")
+                raise
+
+    def warmup(self):
+        """后台预热入口（给 startup 用）。失败只记日志，不影响服务。"""
         try:
-            EmbeddingService._model = SentenceTransformer(
-                EMBEDDING_MODEL,
-                device=EMBEDDING_DEVICE,
-            )
-            logger.success(f"Embedding 模型加载完成")
-            logger.info(f"维度: {EMBEDDING_DIMENSION}")
-        except Exception as e:
-            logger.error(f"加载 Embedding 模型失败: {e}")
-            raise
-    
+            self._ensure_loaded()
+            return True
+        except Exception:
+            return False
+
     @property
     def model(self) -> SentenceTransformer:
+        if EmbeddingService._model is None:
+            self._ensure_loaded()
         return EmbeddingService._model
     
     @property

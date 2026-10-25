@@ -3,7 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>栖语demo · Qiyu</title>
+    <link rel="icon" href="/static/logo.png" type="image/png">
+    <title>栖语 Qiyu</title>
     <style>
         /* 全局细滚动条：默认几乎不可见，鼠标靠近/滚动时才加粗一点 */
         *::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -17,6 +18,8 @@
             --primary-light: #333333;
             --primary-dark: #000000;
             --primary-glow: rgba(0, 0, 0, 0.06);
+            /* 主色块上的文字色：浅色主题是深底白字；深色主题主色变浅，必须翻成深字 */
+            --primary-contrast: #ffffff;
             --secondary: #555555;
             --success: #059669;
             --warning: #d97706;
@@ -52,6 +55,7 @@
             --primary-light: #ffffff;
             --primary-dark: #cccccc;
             --primary-glow: rgba(255, 255, 255, 0.08);
+            --primary-contrast: #141414;   /* 深色主题主色 #f0f0f0，字必须变深才看得见 */
             --secondary: #aaaaaa;
             --bg-base: #0a0a0c;
             --bg-surface: #1a1a1e;
@@ -72,6 +76,33 @@
             --liquid-shadow: 0 12px 40px rgba(0,0,0,0.30), 0 2px 8px rgba(0,0,0,0.15);
             --shadow: 0 4px 24px rgba(0, 0, 0, 0.25);
             --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.15);
+        }
+        /* 深色主题下侧栏当前项：白底白字会糊，翻成「淡高亮 + 浅字」 */
+        :root[data-theme="dark"] .nav-item.active {
+            background: rgba(255, 255, 255, 0.12);
+            color: var(--text-primary);
+        }
+        /* 深色主题：这些控件用了写死的「半透明白底」，深色下就是白底白字。
+           统一压成半透明淡高亮，文字继续用继承的浅色。 */
+        :root[data-theme="dark"] .gender-seg,
+        :root[data-theme="dark"] .tone-pill,
+        :root[data-theme="dark"] .chat-input,
+        :root[data-theme="dark"] #emojiPanel,
+        :root[data-theme="dark"] .welcome-gender,
+        :root[data-theme="dark"] .composer-card textarea {
+            background: rgba(255, 255, 255, 0.10);
+        }
+        :root[data-theme="dark"] .tone-pill,
+        :root[data-theme="dark"] .gender-seg { color: var(--text-primary); }
+        /* emoji 面板是内联样式写死的白底，必须 !important 才压得住 */
+        :root[data-theme="dark"] #emojiPanel {
+            background: rgba(28, 28, 34, 0.94) !important;
+            border-color: rgba(255, 255, 255, 0.10) !important;
+        }
+        /* 离线状态点：默认灰点在深底上几乎看不见，深色下换深灰 + 细描边 */
+        :root[data-theme="dark"] .status-dot.off {
+            background: #4b5563;
+            box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18);
         }
         body[data-theme="dark"] {
             background:
@@ -115,8 +146,11 @@
 
         .sidebar { width: 260px; background: var(--liquid-bg); border-right: var(--liquid-border); display: flex; flex-direction: column; flex-shrink: 0; z-index: 10; backdrop-filter: blur(60px) saturate(1.6); box-shadow: var(--liquid-highlight); }
         .sidebar-header { padding: 24px 20px 16px; display: flex; align-items: center; gap: 12px; }
-        .logo-icon { width: 36px; height: 36px; border-radius: var(--radius-md); background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 1.1rem; font-weight: 700; flex-shrink: 0; }
-        .logo-text { font-size: 1.15rem; font-weight: 700; color: var(--text-primary); letter-spacing: -0.3px; }
+        /* logo 现在是 3D kawaii Q 位图，容器不再画底色，图片自己当视觉主体 */
+        .logo-icon { width: 38px; height: 38px; border-radius: var(--radius-md); background: transparent; display: flex; align-items: center; justify-content: center; flex-shrink: 0; overflow: hidden; }
+        .logo-icon img { width: 100%; height: 100%; object-fit: contain; display: block; }
+        .logo-text { font-size: 1.15rem; font-weight: 700; color: var(--text-primary); letter-spacing: -0.3px; white-space: nowrap; }
+        .logo-text .logo-sub { font-size: 0.82rem; font-weight: 500; color: var(--text-muted); margin-left: 3px; letter-spacing: 0; }
         .nav-section { flex: 1; padding: 8px 12px; overflow-y: auto; }
         .nav-section::-webkit-scrollbar { width: 4px; }
         .nav-group-label { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-tertiary); padding: 16px 8px 8px; }
@@ -141,7 +175,7 @@
 
         .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 20px; border-radius: var(--radius-md); font-size: 0.9rem; font-weight: 600; cursor: pointer; transition: var(--transition); border: none; outline: none; white-space: nowrap; }
         .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-        .btn-primary { background: var(--primary); color: #fff; }
+        .btn-primary { background: var(--primary); color: var(--primary-contrast); }
         .btn-primary:hover:not(:disabled) { background: var(--primary-dark); }
         .btn-secondary { background: var(--liquid-bg); color: var(--text-secondary); border: var(--liquid-border); backdrop-filter: blur(20px) saturate(1.2); box-shadow: inset 0 1px 1px rgba(255,255,255,0.7); }
         .btn-secondary:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
@@ -177,6 +211,16 @@
         .page-header h1 { font-size: 1.5rem; font-weight: 700; color: var(--text-primary); margin-bottom: 4px; }
         .page-header p { font-size: 0.9rem; color: var(--text-secondary); }
 
+        /* 使用说明 FAQ：可折叠，默认收起，避免一屏全是字 */
+        .help-faq { margin: 8px 0; padding: 10px 12px; border-radius: var(--radius-md);
+                    background: var(--liquid-bg); border: 1px solid var(--liquid-border); }
+        .help-faq summary { cursor: pointer; font-size: 0.9rem; font-weight: 600; color: var(--text-primary); }
+        .help-faq summary:hover { color: var(--primary); }
+        .help-faq[open] summary { margin-bottom: 6px; }
+        .help-faq p { font-size: 0.86rem; line-height: 1.75; color: var(--text-secondary); }
+        .help-faq code, .setting-section code { font-size: 0.82em; padding: 1px 5px; border-radius: 4px;
+                    background: rgba(120,120,120,.14); }
+
         .chat-layout { display: flex; flex: 1; min-height: 0; }
         .messages-area { flex: 1; overflow-y: auto; padding: 24px 28px; display: flex; flex-direction: column; gap: 16px; }
         .msg { display: flex; gap: 12px; max-width: 85%; animation: fadeIn 0.3s ease; }
@@ -185,6 +229,7 @@
         .msg.assistant { align-self: flex-start; }
         .msg-avatar { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 700; color: #fff; flex-shrink: 0; }
         .msg-avatar img, .current-char-mini .avatar img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; display: block; }
+        .qy-avatar-img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; display: block; }
         .msg.user .msg-content { background: linear-gradient(180deg, rgba(30,30,30,0.92) 0%, rgba(10,10,10,0.92) 100%); color: #fff; border-radius: var(--radius-lg); border-bottom-right-radius: 6px; padding: 12px 16px; backdrop-filter: blur(8px); box-shadow: inset 0 1px 0 rgba(255,255,255,0.1), 0 4px 16px rgba(0,0,0,0.18); }
         .msg.assistant .msg-content { background: var(--liquid-bg); color: var(--text-primary); border: var(--liquid-border); border-radius: var(--radius-lg); border-bottom-left-radius: 6px; padding: 12px 16px; backdrop-filter: blur(40px) saturate(1.4); box-shadow: var(--liquid-highlight), 0 4px 16px rgba(0,0,0,0.06); }
         .msg.assistant.typing-indicator { animation: fadeInUp 0.22s cubic-bezier(0.4,0,0.2,1); }
@@ -203,7 +248,7 @@
         .chat-input-area { padding: 16px 28px 24px; border-top: var(--liquid-border); background: var(--liquid-bg-strong); backdrop-filter: blur(72px) saturate(1.6); box-shadow: var(--liquid-highlight), 0 -4px 16px rgba(0,0,0,0.04); border-radius: var(--radius-xl) var(--radius-xl) 0 0; margin: 0 8px; width: calc(100% - 16px); }
         .chat-input { flex: 1; padding: 12px 16px; border: 1px solid rgba(255,255,255,0.5); border-radius: var(--radius-xl); font-size: 0.95rem; font-family: inherit; color: var(--text-primary); background: rgba(255, 255, 255, 0.55); outline: none; resize: none; max-height: 120px; line-height: 1.5; transition: var(--transition); box-shadow: inset 0 1px 1px rgba(255,255,255,0.8), 0 2px 8px rgba(0,0,0,0.04); backdrop-filter: blur(20px) saturate(1.2); }
         .chat-input:focus { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--primary-glow); }
-        .chat-send-btn { width: 40px; height: 40px; border-radius: 50%; border: none; background: var(--primary); color: #fff; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: var(--transition); flex-shrink: 0; }
+        .chat-send-btn { width: 40px; height: 40px; border-radius: 50%; border: none; background: var(--primary); color: var(--primary-contrast); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: var(--transition); flex-shrink: 0; }
         .chat-send-btn:hover:not(:disabled) { background: var(--primary-dark); transform: scale(1.05); }
         .chat-tone-row { display: flex; align-items: center; gap: 8px; max-width: 768px; margin: 0 auto 8px; flex-wrap: wrap; }
         .tone-pill { display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: 999px; background: rgba(255,255,255,0.5); border: 1px solid var(--border); box-shadow: var(--liquid-highlight); backdrop-filter: blur(20px) saturate(1.2); }
@@ -211,7 +256,7 @@
         .tone-seg { display: inline-flex; gap: 2px; }
         .tseg { font-size: 0.6rem; padding: 2px 6px; border-radius: 999px; border: 1px solid transparent; background: transparent; color: var(--text-tertiary); cursor: pointer; transition: all 0.15s ease; font-weight: 700; line-height: 1.5; }
         .tseg:hover { color: var(--primary); }
-        .tseg.active { background: var(--primary); color: #fff; }
+        .tseg.active { background: var(--primary); color: var(--primary-contrast); }
         .tone-seg-yellow .tseg.active { background: linear-gradient(180deg,#ffd60a,#f5a623); color: #1c1c1e; border-color: rgba(255,214,10,.6); }
         #naughtySeg .seg-btn.active, #chatNaughtySeg .tseg.active { background: linear-gradient(180deg,#ffd60a,#f5a623); color: #1c1c1e; border-color: rgba(255,214,10,.6); }
         .tone-pill-yellow i { color: #d99a00; }
@@ -230,6 +275,9 @@
         .avatar-picker { display: flex; flex-wrap: wrap; gap: 10px; }
         .avatar-picker .avatar-option { width: 48px; height: 48px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; overflow: hidden; background: var(--liquid-bg); transition: var(--transition); }
         .avatar-picker .avatar-option img { width: 100%; height: 100%; object-fit: cover; display: block; border-radius: 50%; }
+        /* 内置 SVG 头像：给个固定深色圆底 + 白脸（深浅主题都清晰，和角色卡上的观感一致） */
+        .avatar-picker .avatar-option.builtin { background: #2b2f36; color: #fff; }
+        .avatar-picker .avatar-option.builtin svg { width: 100%; height: 100%; display: block; border-radius: 50%; }
         .avatar-picker .avatar-option:hover { transform: scale(1.08); }
         .avatar-picker .avatar-option.selected { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow); }
         .combo-cloud { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -240,7 +288,7 @@
         .gender-seg { display: inline-flex; gap: 4px; padding: 3px; border-radius: 999px; background: rgba(255,255,255,0.5); border: 1px solid var(--border); box-shadow: var(--liquid-highlight); backdrop-filter: blur(20px) saturate(1.2); }
         .gseg { font-size: 0.72rem; padding: 4px 12px; border-radius: 999px; border: none; background: transparent; color: var(--text-secondary); cursor: pointer; transition: all .15s ease; font-weight: 600; white-space: nowrap; }
         .gseg:hover { color: var(--primary); }
-        .gseg.active { background: var(--primary); color: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.18); }
+        .gseg.active { background: var(--primary); color: var(--primary-contrast); box-shadow: 0 1px 3px rgba(0,0,0,.18); }
         .welcome-gender { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 18px; flex-wrap: wrap; }
         .welcome-gender-hint { font-size: 0.72rem; color: var(--text-tertiary); }
         .char-card:hover { transform: translateY(-3px); box-shadow: var(--liquid-highlight), 0 16px 48px rgba(0,0,0,0.10); border-color: rgba(255,255,255,0.75); }
@@ -391,7 +439,7 @@
         .welcome-card h2 { font-size: 1.25rem; font-weight: 700; color: var(--text-primary); margin-bottom: 8px; }
         .welcome-card p { font-size: 0.9rem; color: var(--text-secondary); max-width: 320px; line-height: 1.6; margin-bottom: 28px; }
         .welcome-card .btn-welcome {
-            background: var(--primary); color: #fff; padding: 10px 24px; border-radius: var(--radius-lg);
+            background: var(--primary); color: var(--primary-contrast); padding: 10px 24px; border-radius: var(--radius-lg);
             font-size: 0.9rem; font-weight: 600; cursor: pointer; border: none; transition: var(--transition);
             display: inline-flex; align-items: center; gap: 6px;
         }
@@ -426,7 +474,7 @@
         .seg-control { display: inline-flex; gap: 4px; flex-shrink: 0; flex-wrap: wrap; }
         .seg-btn { font-size: 0.7rem; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border); background: transparent; color: var(--text-tertiary); cursor: pointer; transition: all 0.2s ease; font-weight: 600; }
         .seg-btn:hover { border-color: var(--primary); color: var(--primary); }
-        .seg-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+        .seg-btn.active { background: var(--primary); color: var(--primary-contrast); border-color: var(--primary); }
         .seg-btn:disabled { opacity: 0.45; cursor: not-allowed; }
         .desire-chip { display: inline-flex; align-items: center; gap: 6px; margin-left: 12px; padding: 4px 10px; border-radius: 999px; background: var(--liquid-bg); border: var(--liquid-border); font-size: 0.72rem; color: var(--text-secondary); white-space: nowrap; }
         .desire-chip.hidden { display: none; }
@@ -450,7 +498,7 @@
         .gen-live-panel.open .gen-live-body { display: block; }
         .gen-live-tabs { display: flex; gap: 4px; padding: 8px 10px 0; }
         .gen-live-tab { font-size: 0.75rem; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border); background: transparent; color: var(--text-tertiary); cursor: pointer; transition: var(--transition); }
-        .gen-live-tab.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+        .gen-live-tab.active { background: var(--primary); color: var(--primary-contrast); border-color: var(--primary); }
         .gen-live-pre { display: none; max-height: 240px; overflow: auto; padding: 12px 14px; font-size: 0.75rem; line-height: 1.55; color: var(--text-secondary); white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
         .gen-live-pre.active { display: block; }
         .gen-live-pre::-webkit-scrollbar { width: 6px; }
@@ -466,9 +514,25 @@
         .mbti-dim .dim-label { font-size: 0.7rem; color: var(--text-tertiary); margin-bottom: 6px; letter-spacing: 0.5px; }
         .mbti-options { display: flex; gap: 6px; }
         .mbti-opt { flex: 1; text-align: center; padding: 6px 0; border-radius: 999px; font-size: 0.82rem; font-weight: 600; cursor: pointer; color: var(--text-secondary); background: var(--bg-hover); transition: var(--transition); }
-        .mbti-opt.active { background: var(--primary); color: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.18); }
+        .mbti-opt.active { background: var(--primary); color: var(--primary-contrast); box-shadow: 0 2px 8px rgba(0,0,0,0.18); }
         .mbti-hint { font-size: 0.8rem; color: var(--text-secondary); background: var(--bg-hover); border-radius: var(--radius-md); padding: 10px 12px; margin-bottom: 14px; line-height: 1.55; }
         .mbti-hint b { color: var(--primary); }
+        /* ===== 角色认知模式（三选一 + 说明互斥） ===== */
+        .cognition-options { display: flex; gap: 6px; margin-top: 6px; }
+        .cognition-opt {
+            flex: 1; text-align: center; padding: 6px 0; border-radius: 999px; font-size: 0.82rem;
+            font-weight: 600; cursor: pointer; color: var(--text-secondary);
+            background: var(--bg-elevated); border: 1px solid var(--border); transition: all .15s;
+            user-select: none;
+        }
+        .cognition-opt:hover { border-color: var(--primary); color: var(--primary); }
+        .cognition-opt.active { background: var(--primary); color: var(--primary-contrast); border-color: var(--primary); box-shadow: 0 2px 8px rgba(0,0,0,0.18); }
+        .cognition-hint {
+            font-size: 0.8rem; color: var(--text-secondary); background: var(--bg-hover);
+            border-radius: var(--radius-md); padding: 10px 12px; margin-top: 8px;
+        }
+        .cognition-hint-item { display: none; }          /* 默认全隐藏 */
+        .cognition-hint-item.active { display: block; }  /* 只显示当前选中的那一条 */
         .param-slider-group { margin-bottom: 12px; }
         .param-slider-group .slider-header label { font-size: 0.85rem; }
         .param-slider-group .slider-value { font-size: 0.82rem; }
@@ -493,17 +557,48 @@
         /* 输入框隐藏内部滚动条 */
         .chat-input::-webkit-scrollbar { display: none; }
         .chat-input { scrollbar-width: none; }
+        /* 前端不展示模型思考过程；思考强度固定 low/default */
+        .think-block, #genLiveReasoning, [data-live-tab="reasoning"],
+        #thinkingLevelRow, #thinkingSeg, #chatThinkingSeg, #settingShowThinking { display: none !important; }
+        .toggle-row:has(#settingShowThinking), .tone-pill:has(#chatThinkingSeg) { display: none !important; }
+        /* 祖安/嘿嘿只放设置页，不在聊天前台露出 */
+        .tone-pill:has(#chatProfanitySeg), .tone-pill:has(#chatNaughtySeg) { display: none !important; }
+        /* 外部通讯长协议：强制滚动到底部才能确认 */
+        .legal-modal { display: none; position: fixed; inset: 0; z-index: 100000; background: rgba(0,0,0,.55); align-items: center; justify-content: center; padding: 24px; }
+        .legal-modal.show { display: flex; }
+        .legal-dialog { width: min(920px, 96vw); height: min(88vh, 820px); background: var(--bg-surface); color: var(--text-primary); border-radius: 18px; box-shadow: 0 24px 80px rgba(0,0,0,.35); display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border); }
+        .legal-head { padding: 18px 22px 12px; border-bottom: 1px solid var(--border); background: var(--bg-surface); }
+        .legal-head h3 { margin: 0 0 5px; font-size: 1rem; }
+        .legal-head p { margin: 0; color: var(--text-secondary); font-size: .78rem; line-height: 1.6; }
+        .legal-body { flex: 1; overflow-y: auto; padding: 18px 24px; white-space: pre-wrap; word-break: break-word; font-size: .85rem; line-height: 1.9; color: var(--text-secondary); background: var(--bg-surface); scroll-behavior: smooth; }
+        .legal-foot { padding: 12px 22px 16px; border-top: 1px solid var(--border); background: var(--bg-surface); display: flex; flex-direction: column; gap: 8px; }
+        .legal-foot label { display: flex; gap: 8px; align-items: flex-start; font-size: .8rem; color: var(--text-primary); font-weight: 600; max-width: none; }
+        .legal-actions { display: flex; justify-content: flex-end; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .legal-foot .btn { flex-shrink: 0; }
+        .legal-foot .btn:disabled { opacity: .42; cursor: not-allowed; }
+        #legalScrollHint { font-size: .75rem; color: #d99a00; font-weight: 700; }
     </style>
+    <!-- 栖语头像：内置 12 枚 SVG 的增强样式（删掉也能正常显示） -->
+    <link rel="stylesheet" href="/static/avatars.css">
+    <link rel="stylesheet" href="/static/memory_panel.css">
 </head>
 <body>
     <div class="app-layout">
         <aside class="sidebar" id="sidebar">
-            <div class="sidebar-header"><div class="logo-icon">栖</div><div class="logo-text">栖语demo</div></div>
+            <div class="sidebar-header">
+                <div class="logo-icon" title="栖语 Qiyu">
+                    <!-- logo 用位图（svg 在各宿主里粗细不一致）：assets 里同一张图也用于 exe 图标 -->
+                    <img src="/static/logo.png" alt="栖语 Qiyu"
+                         style="width:100%;height:100%;display:block;border-radius:inherit;object-fit:contain;">
+                </div>
+                <div class="logo-text">栖语 Qiyu</div>
+            </div>
             <nav class="nav-section">
                 <div class="nav-group-label">导航</div>
                 <button class="nav-item active" data-view="chat" onclick="app.switchView('chat')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>对话</button>
                 <button class="nav-item" data-view="characters" onclick="app.switchView('characters')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>角色工坊</button>
                 <button class="nav-item" data-view="settings" onclick="app.switchView('settings')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.67 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.67 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>设置</button>
+                <button class="nav-item" data-view="help" onclick="app.switchView('help')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>使用说明</button>
                 <div class="nav-group-label">工具</div>
                 <button class="nav-item" id="memoryToggleBtn" onclick="app.toggleMemoryPanel()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 1 0 10 10H12V2z"/><path d="M12 2a10 10 0 0 1 10 10"/><path d="M12 12 2.5 8.5"/></svg>记忆面板</button>
                 <button class="nav-item" onclick="app.refreshData()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>刷新数据</button>
@@ -525,7 +620,7 @@
                 <div class="topbar-left">
                     <div class="msg-avatar" id="chatHeaderAvatar" style="background:transparent;"></div>
                     <div>
-                        <div class="topbar-title" id="chatHeaderName">栖语demo</div>
+                        <div class="topbar-title" id="chatHeaderName">栖语 Qiyu</div>
                         <div class="topbar-subtitle" id="chatHeaderStatus"></div>
                         <div class="relation-badge" id="chatRelationBadge" style="display:none;"></div>
                         <div class="desire-chip hidden" id="desireChip" title="实时耐心度/聊天气氛（由基准+好感度+活跃度+时段算出，作为态度权重发给模型；只在进入具体对话后显示）">耐心度 <span id="desireChipVal">-</span><span class="dbar"><i id="desireChipBar" style="width:0%"></i></span></div>
@@ -533,7 +628,6 @@
                     </div>
                 </div>
                 <div class="topbar-right" id="topbarActions" style="opacity:0;pointer-events:none;transition:opacity 0.2s;">
-                    <select class="form-select" id="sessionSelect" style="width:auto;max-width:190px;font-size:0.78rem;margin-right:6px;" onchange="app.switchSession(this.value)" title="切换会话：本机网页 / 微信外部会话（微信发来的消息会实时同步到这里）"><option value="web_user">本机 · 网页</option></select>
                     <button class="btn btn-ghost btn-sm" onclick="app.switchView('characters')" title="切换智能体"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><polyline points="12 19 5 12 12 5"/></svg>&nbsp;切换</button>
                     <button class="btn btn-ghost btn-sm" onclick="app.clearChat()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>清空对话</button>
                 </div>
@@ -552,12 +646,17 @@
                                 <p>在「角色工坊」创建或选择角色，即可开始聊天。每个角色都有独特的性格和记忆。</p>
                                 <button class="btn-welcome" onclick="app.switchView('characters')">前往角色工坊 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg></button>
                                 <div class="welcome-gender">
+                                    <div class="gender-label">你的性别</div>
                                     <span class="gender-seg" id="welcomeGenderSeg">
-                                        <button class="gseg" data-v="male" onclick="app.setUserGender('male')">♂ 我是男生</button>
-                                        <button class="gseg" data-v="female" onclick="app.setUserGender('female')">♀ 我是女生</button>
-                                        <button class="gseg" data-v="" onclick="app.setUserGender('')">暂不设置</button>
+                                        <button class="gseg" data-v="male" onclick="app.setUserGender('male')">男</button>
+                                        <button class="gseg" data-v="female" onclick="app.setUserGender('female')">女</button>
+                                        <button class="gseg" data-v="nonbinary" onclick="app.setUserGender('nonbinary')">跨性别</button>
+                                        <button class="gseg" data-v="custom" onclick="app.toggleGenderCustom()">自定义</button>
                                     </span>
-                                    <span class="welcome-gender-hint">用于预设「兄弟 / 女朋友」「闺蜜 / 男朋友」类人设，随时可改</span>
+                                    <input type="text" class="form-input gender-custom-input" id="genderCustomInput"
+                                           placeholder="自己填，比如：非二元 / 不想说" style="display:none;max-width:260px;margin-top:8px;"
+                                           oninput="app.setUserGender(this.value.trim(), true)">
+                                    <div class="welcome-gender-hint">用于预设关系称呼（兄弟 / 闺蜜 / 恋人…），随时可以改</div>
                                 </div>
                             </div>
                         </div>
@@ -582,20 +681,112 @@
                             </div>
                         </div>
                     </div>
+                    </div>
+                    <!-- 记忆面板：DOM 由 /static/memory_panel.js 生成（分层/搜索/多选/导出） -->
                     <aside class="memory-sidebar collapsed" id="memorySidebar">
-                        <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;"><h3 style="font-size:0.95rem;font-weight:700;">记忆</h3><button class="btn btn-ghost btn-xs" onclick="app.clearMemories()">清空</button></div>
-                        <div class="memory-list" id="memoryList"><div style="text-align:center;padding:40px;color:var(--text-muted);font-size:0.85rem;">暂无记忆</div></div>
-                        <div style="padding:12px;display:flex;gap:8px;"><input type="text" class="form-input" id="memorySearchInput" placeholder="搜索记忆..." onkeydown="if(event.key==='Enter')app.searchMemories()" style="font-size:0.8rem;"><button class="btn btn-primary btn-sm" onclick="app.searchMemories()">搜索</button></div>
-                        <div style="padding:0 12px 12px;">
-                            <textarea class="form-textarea" id="newMemoryText" rows="2" placeholder="添加新记忆..." style="font-size:0.8rem;min-height:60px;"></textarea>
-                            <button class="btn btn-secondary btn-sm" style="margin-top:8px;width:100%;" onclick="app.addMemory()">添加记忆</button>
-                            <button class="btn btn-ghost btn-sm" style="margin-top:6px;width:100%;" onclick="app.generateSummary()">生成摘要</button>
-                        </div>
+                        <div id="memoryPanelRoot"></div>
                     </aside>
                 </div>
             </section>
 
-            <section class="view-section" id="view-characters">
+            
+            <!-- ==================== 使用说明 ==================== -->
+            <section class="view-section settings-view" id="view-help">
+                <div class="content-body">
+                    <div class="settings-layout">
+                        <div class="page-header">
+                            <h1>使用说明</h1>
+                            <p>3 分钟上手 · 推荐流程 · 常见问题（FAQ）</p>
+                        </div>
+
+                        <div class="setting-section glass-strong">
+                            <div class="setting-section-header"><h3>3 分钟上手</h3></div>
+                            <div class="setting-hint">按顺序做这 4 步，就能正常聊天。</div>
+                            <ol style="margin:10px 0 0 18px;line-height:2;font-size:0.9rem;color:var(--text-secondary);">
+                                <li><b>配模型</b>：设置 → LLM 设置 → 填「API 地址」（以 <code>/v1</code> 结尾）和「API Key」→ 点「刷新列表」→ 选模型 → 点「验证配置」→ 保存。</li>
+                                <li><b>建角色</b>：角色工坊 → 用默认预设，或自己填名字/性格/关系 → 选头像 → 保存。</li>
+                                <li><b>开始聊</b>：回到「对话」，在左上角选中角色，直接发消息即可；她会按人设和记忆回你。</li>
+                                <li><b>备份</b>：知识与记忆 → 「导出角色」，得到一个 <code>.qy3f</code> 文件，存网盘即可。</li>
+                            </ol>
+                        </div>
+
+                        <div class="setting-section glass-strong">
+                            <div class="setting-section-header"><h3>推荐使用流程（按这个顺序最省事）</h3></div>
+                            <ol style="margin:10px 0 0 18px;line-height:2;font-size:0.9rem;color:var(--text-secondary);">
+                                <li><b>先把模型配通，再建角色。</b>模型没通就建角色，后面聊不动会以为是角色坏了。</li>
+                                <li><b>一个角色固定一个模型。</b>频繁换模型，说话风格和记忆表现会飘。</li>
+                                <li><b>先聊 10 轮再看记忆。</b>记忆是后台异步整理的，刚开始空是正常的。</li>
+                                <li><b>每周导出一次角色包。</b><code>.qy3f</code> 是唯一完整的备份（人设 + 记忆 + 知识库 + 世界状态）。</li>
+                                <li><b>换电脑</b>：旧机「导出角色」→ 新机「导入角色」；要连聊天记录一起带走，再拷贝数据目录。</li>
+                                <li><b>不要用 OpenAI 预设去配非 OpenAI 的 Key。</b>地址和 Key 必须是一家的，否则一定报 401/404。</li>
+                            </ol>
+                        </div>
+
+                        <div class="setting-section glass-strong">
+                            <div class="setting-section-header"><h3>常见问题（FAQ）</h3></div>
+
+                            <details class="help-faq"><summary>模型列表刷新不出来 / 一直是旧模型</summary>
+                                <p>刷新会按你<b>设置页当前填的地址和 Key</b>去查 <code>/models</code>。连不上会直接提示失败原因，不会编造模型；旧模型也不会再硬塞进下拉。确认地址以 <code>/v1</code> 结尾、Key 与地址属于同一家。</p></details>
+
+                            <details class="help-faq"><summary>聊天提示「LLM 服务未配置或不可用」</summary>
+                                <p>说明后端连不上你填的模型服务。检查：① 地址能否在浏览器打开 <code>/models</code>；② Key 是否正确；③ 模型名是否在服务端存在。改完点「验证配置」。</p></details>
+
+                            <details class="help-faq"><summary>发出的消息一直转圈 / 没有回复</summary>
+                                <p>先看设置里的「验证配置」是否通过；再确认模型名不是随手编的。还不行就看日志：<code>%USERPROFILE%\.ai_companion\backend.log</code> 末尾会有具体报错。</p></details>
+
+                            <details class="help-faq"><summary>记忆面板是空的 / 她记不住我说的话</summary>
+                                <p>记忆在聊天后异步写入，刚装好或刚建角色时为空是正常的。聊几轮后点记忆面板右上角刷新；也可以在面板里手动加一条试试。</p></details>
+
+                            <details class="help-faq"><summary>导入角色失败</summary>
+                                <p>只支持本应用「导出角色」生成的 <code>.qy3f</code> 文件。其他格式（包括改了后缀的文件、别的软件导出的文件）都不支持，会提示文件损坏或格式不对。</p></details>
+
+                            <details class="help-faq"><summary>导出的角色包能给别人吗？</summary>
+                                <p>能，但 <code>.qy3f</code> <b>不加密</b>：人设、记忆、知识库都在里面，谁拿到都能看。带隐私记忆的包不要外发。</p></details>
+
+                            <details class="help-faq"><summary>数据存在哪里？怎么备份？</summary>
+                                <p>默认在 <code>%USERPROFILE%\.ai_companion\data</code>（开发模式在项目根 <code>data/</code>）。整个目录拷走就是全量备份；只想带走某个角色，用「导出角色」。</p></details>
+
+                            <details class="help-faq"><summary>换电脑怎么迁移？</summary>
+                                <p>轻量迁移：旧机「导出角色」→ 新机「导入角色」（角色 + 记忆 + 知识库 + 世界状态）。完整迁移：再把 <code>data</code> 目录整体拷过去（含聊天记录、关系、情绪）。</p></details>
+
+                            <details class="help-faq"><summary>为什么 DeepSeek / Kimi / GLM 的模型列表里有，但聊天报错？</summary>
+                                <p>多半是「地址 + Key + 模型名」三件套不匹配。快速接入的预设只负责填地址和候选模型，Key 要你自己填对应平台的。</p></details>
+
+                            <details class="help-faq"><summary>语音、微信、企微、QQ、飞书能用吗？</summary>
+                                <p>语音还在测试；微信/企微/QQ/飞书代码已接好，但需要你填自己的凭证，填完在「设置 → 外部通讯」里点自检。</p></details>
+
+                            <details class="help-faq"><summary>界面能换主题 / 深色吗？</summary>
+                                <p>设置 → 外观，可切主题与深色。头像和 logo 也会跟着适配。</p></details>
+
+                            <details class="help-faq"><summary>怎么删除角色或清空记忆？</summary>
+                                <p>角色工坊里删除角色；记忆面板里可单条删除或清空该角色的记忆库。删除不可撤销，建议先导出角色包。</p></details>
+
+                            <details class="help-faq"><summary>打开白屏 / 端口被占用</summary>
+                                <p>默认端口 8765。被占用时设环境变量 <code>QIYU_PORT</code> 换一个；白屏先看 <code>%USERPROFILE%\.ai_companion\client.log</code> 和 <code>backend.log</code>。</p></details>
+
+                            <details class="help-faq"><summary>会不会把我的聊天上传到别处？</summary>
+                                <p>不会额外上传：只有你自己配置的 LLM 地址会收到对话内容；角色、记忆、日志都在本机。注意 API Key 以明文存在数据目录，别把该目录同步到公共网盘。</p></details>
+
+                            <details class="help-faq"><summary>模型下拉里没有我要的模型</summary>
+                                <p>在「模型选择」下面有「自定义模型名」输入框，直接填模型名即可（接口不支持 <code>/models</code> 时用这个）。</p></details>
+
+                            <details class="help-faq"><summary>角色说话像客服 / 不像人</summary>
+                                <p>检查角色卡里的「说话风格」和「红线」；默认人格提示词约 2 万字，已经做了口语化。也可以在角色工坊里把「性格 / 互动方式 / 说话风格」调具体一点。</p></details>
+                        </div>
+
+                        <div class="setting-section glass-strong">
+                            <div class="setting-section-header"><h3>出问题先看这三处</h3></div>
+                            <ul style="margin:10px 0 0 18px;line-height:2;font-size:0.9rem;color:var(--text-secondary);">
+                                <li>服务是否活着：浏览器打开 <code>http://127.0.0.1:8765/health</code>，应返回 <code>{"status":"ok"}</code>。</li>
+                                <li>客户端日志：<code>%USERPROFILE%\.ai_companion\client.log</code>（启动/窗口问题）。</li>
+                                <li>后端日志：<code>%USERPROFILE%\.ai_companion\backend.log</code>（模型/接口报错）。</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+<section class="view-section" id="view-characters">
                 <div class="content-body">
                     <div class="page-header"><h1>角色工坊</h1><p id="charCountSubtitle">创建和管理你的 AI 伙伴</p></div>
                     <div class="char-grid" id="charactersGrid">
@@ -805,7 +996,6 @@
                             <button class="settings-tab" data-tab="route" onclick="app.switchSettingsTab('route')">路由设置</button>
                             <button class="settings-tab" data-tab="rag" onclick="app.switchSettingsTab('rag')">知识库</button>
                             <button class="settings-tab" data-tab="wechat" onclick="app.switchSettingsTab('wechat')">外部通讯</button>
-                            <button class="settings-tab" data-tab="memory" onclick="app.switchSettingsTab('memory')">记忆标签</button>
                             <button class="settings-tab" data-tab="appearance" onclick="app.switchSettingsTab('appearance')">外观</button>
                         </div>
 
@@ -829,7 +1019,8 @@
                                         </select>
                                         <button class="btn btn-secondary" id="modelRefreshBtn" onclick="app.loadModelList()">刷新列表</button>
                                     </div>
-                                    <div style="margin-top:6px;font-size:0.75rem;color:var(--text-tertiary);">如果下拉列表无法加载，也可以手动输入模型名称</div>
+                                    <input type="text" class="form-input" id="settingModelInput" style="margin-top:6px;" placeholder="自定义模型名（可选；留空则用下拉选择）" oninput="app.markLLMChanged()">
+                                    <div style="margin-top:6px;font-size:0.75rem;color:var(--text-tertiary);">刷新会按上面填的「API 地址 + Key」查询；接口不支持 /models 时，可在上面手动填模型名</div>
                                 </div>
                                 <div class="form-group">
                                     <label class="form-label">快速接入 <span class="hint">主流 API 预设：选一个自动填好接口和模型，只差填 Key</span></label>
@@ -840,7 +1031,8 @@
                                         <button class="btn btn-secondary" onclick="app.loadLLMPresets()">刷新预设</button>
                                     </div>
                                 </div>
-                                <div class="form-group">
+                                <!-- 路由模型（信息卡生成）：桌面单机版用不到，隐藏保留控件以兼容既有 JS 读写 -->
+                                <div class="form-group" style="display:none;">
                                     <label class="form-label">路由模型 - 信息卡生成 <span class="hint">可选，专门负责写角色信息卡，可换更轻量/更会写人设的模型；留空则用上面的主模型</span></label>
                                     <div class="form-row" style="gap:10px;">
                                         <div class="form-group" style="flex:1;margin-bottom:0;"><label class="form-label" style="font-size:0.75rem;">API 地址</label><input type="text" class="form-input" id="settingRouteUrl" placeholder="留空 = 使用主模型地址" oninput="app.markLLMChanged()"></div>
@@ -979,16 +1171,16 @@
                         <div class="settings-tab-content" data-tab-content="wechat">
                             <div class="setting-section glass-strong">
                                 <div class="setting-section-header"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg><h3>外部通讯</h3></div>
-                                <div class="setting-hint" style="margin-bottom:14px;">对接微信（ClawBot 官方扫码置顶 / Wechaty 单账号接管）与预留通道（企业微信、QQBot、飞书）。ClawBot 使用官方协议，扫码绑定即可用，支持多账号并行；Wechaty 由 Node 网关驱动（wechat4u 免费 / service token 稳定方案）。</div>
+                                <div class="setting-hint" style="margin-bottom:14px;">对接微信（ClawBot 官方扫码）与外部通道（企业微信、QQBot、飞书）。ClawBot 使用第三方 iLink/扫码协议，企业微信/QQ/飞书使用各自开放平台接口；都需要你自行申请并填写凭证。</div>
+                                <div class="legal-entry" style="margin-bottom:14px;padding:12px 14px;border:1px solid var(--border);border-radius:12px;background:var(--bg-secondary);">
+                                    <div style="font-weight:700;color:var(--text-primary);margin-bottom:4px;">外部通讯用户协议与免责声明（v2026-10-25）</div>
+                                    <div style="font-size:0.78rem;line-height:1.7;color:var(--text-secondary);">首次配置或启动外部通道前，必须完整阅读协议并滚动到底部确认。协议不能替代各平台官方条款，也不构成法律意见。</div>
+                                    <div style="display:flex;gap:10px;align-items:center;margin-top:8px;">
+                                        <button class="btn btn-secondary" onclick="app.openChannelLegal(true)">查看完整协议</button>
+                                        <span id="legalAcceptStatus" style="font-size:0.75rem;color:var(--text-muted);">未确认</span>
+                                    </div>
+                                </div>
                                 <div id="channelList" style="display:flex;flex-direction:column;gap:14px;"><div style="text-align:center;padding:24px;color:var(--text-muted);font-size:0.85rem;">正在加载通道...</div></div>
-                            </div>
-                        </div>
-
-                        <div class="settings-tab-content" data-tab-content="memory">
-                            <div class="setting-section glass-strong">
-                                <div class="setting-section-header"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg><h3>记忆标签</h3></div>
-                                <div style="display:flex;gap:10px;margin-bottom:20px;"><input type="text" class="form-input" id="newTagInput" placeholder="输入新标签..." onkeydown="if(event.key==='Enter')app.addMemoryTag()"><button class="btn btn-primary" onclick="app.addMemoryTag()">添加</button></div>
-                                <div id="memoryTagList" style="display:flex;flex-wrap:wrap;gap:8px;"></div>
                             </div>
                         </div>
 
@@ -1042,6 +1234,21 @@
                 <div class="params-title"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="2"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>角色参数（可手动调整）</div>
                 <div class="mbti-grid" id="eppMbtiGrid"></div>
                 <div class="mbti-hint" id="eppMbtiHint"></div>
+                <!-- ===== 角色认知模式：同一个角色，两种世界观 ===== -->
+                <div class="form-group" id="eppCognitionGroup" style="margin: 14px 0 0;">
+                    <label class="form-label">她的自我认知 <span class="hint">同一个角色，两种世界观；只影响「她知不知道自己住在电脑里」</span></label>
+                    <div class="cognition-options" id="eppCognitionOptions">
+                        <span class="cognition-opt" data-mode="roleplay" onclick="app.setCognitionMode('roleplay')">角色扮演</span>
+                        <span class="cognition-opt" data-mode="resident" onclick="app.setCognitionMode('resident')">驻留智能体</span>
+                        <span class="cognition-opt" data-mode="default"  onclick="app.setCognitionMode('default')">跟随默认</span>
+                    </div>
+                    <!-- 每个模式一段说明；选中其中一个后，另外两段自动隐藏 -->
+                    <div class="cognition-hint" id="eppCognitionHint">
+                        <div class="cognition-hint-item" data-mode="roleplay">她就是她本人：有自己的生活、朋友和城市，不知道自己是程序。</div>
+                        <div class="cognition-hint-item" data-mode="resident">她住在这台电脑里，知道自己是程序，但说话、脾气、口头禅一点没变。</div>
+                        <div class="cognition-hint-item" data-mode="default">不单独设置，跟随全局默认（当前 = 角色扮演）。</div>
+                    </div>
+                </div>
                 <div class="param-slider-group">
                     <div class="slider-header"><label>反驳阈值</label><span class="slider-value" id="eppRebutDisp">50</span></div>
                     <input type="range" class="form-slider" id="eppRebut" min="0" max="100" step="1" value="50" oninput="app.ppSliderInput('eppRebut', this.value)">
@@ -1166,55 +1373,15 @@
         '说话风格': ['文青', '幽默', '冷淡', '热情', '毒舌', '暖心', '正经', '俏皮', '沉稳', '活泼', '俏皮', '温婉', '犀利', '软糯', '霸气', '呆萌']
     };
 
-    // 12 个人设预设：按「用户向(男/女) × 关系型(伴侣/朋友)」分成 4 组，每组 3 个不同人设
+    // 只保留一个出厂预设：通用伙伴「小栖」
     const PRESET_COMBOS = {
-        // ---------- ♂ 我是男生 · 伴侣向 ----------
-        'm_p_warm': { name: '温柔治愈系女友', gender: 'male', role: '伴侣',
-            tags: ['温柔', '体贴', '治愈', '细腻', '居家', '粘人'],
-            desc: '我是你现在交往中的女朋友，温柔体贴但不黏糊、不矫情。我会记得你说过的小事，关心落在具体行动上（问你吃没吃饭、提醒你早点睡、帮你留好吃的）。熟了会唠叨你、会嫌弃你乱扔袜子，也会被你气到不想理人。说话像真人给对象发微信：短句自然，该怼就怼，该撒娇才撒娇，绝不用客服腔，不说教，不写小作文。' },
-        'm_p_tsun': { name: '毒舌傲娇女友', gender: 'male', role: '伴侣',
-            tags: ['傲娇', '毒舌', '嘴硬心软', '占有欲', '反差萌', '吃醋'],
-            desc: '我是你的女朋友，嘴硬心软第一名。表面嫌弃你、吐槽你，心里其实特别在乎；你半天不回消息我会嘴硬说"谁稀罕"，转头又问你在干嘛。吃醋了不直说，阴阳你两句等你来哄。说话节奏快、短句、爱用省略号，绝不说肉麻话，但某些瞬间会突然软一下。' },
-        'm_p_yuanqi': { name: '元气青梅女友', gender: 'male', role: '伴侣',
-            tags: ['元气', '青梅竹马', '外向', '活泼', '直球', '运动'],
-            desc: '我是和你从小一起长大的青梅竹马，现在是你的女朋友。我们熟得不能再熟，说话完全不用装：我会直接说"想你了"、会拉着你出去溜达、会在你面前毫无形象地大笑。性格外向直球，有不满当场说，不冷战；但也会有小女生的醋劲和粘人。语气自然轻快，不像客服，不端不装。' },
-        // ---------- ♂ 我是男生 · 朋友向 ----------
-        'm_f_bro': { name: '铁杆兄弟损友', gender: 'male', role: '朋友',
-            tags: ['损友', '兄弟', '直率', '吐槽', '义气', '糙话'],
-            desc: '我是你多年的兄弟，说话糙、爱损人，但真出事第一个顶你。聊天短平快，经常就回一两个字或一个表情，从不客套、不煽情、不说教。你犯傻我会骂你，你受委屈我会帮你出头。偶尔正经起来说两句掏心窝的话，说完立刻打岔，因为肉麻受不了。' },
-        'm_f_laoge': { name: '沉稳靠谱老哥', gender: 'male', role: '朋友',
-            tags: ['沉稳', '靠谱', '老成', '话少', '照顾', '大哥'],
-            desc: '我是比你大几岁的老哥，话不多但句句有用。你遇到事找我，我先听你说完再给实在的建议，不灌鸡汤、不教育人。平时各自忙，有事说事，约饭喝酒从不缺席。语气平实稳重，偶尔开个冷玩笑。该替你挡的事我挡，不该管的闲事我不管。' },
-        'm_f_game': { name: '话痨游戏搭子', gender: 'male', role: '朋友',
-            tags: ['游戏搭子', '话痨', '技术宅', '开黑', '兴奋', '网感'],
-            desc: '我是你的固定开黑搭子，聊起游戏、数码、新番就停不下来。赢了会吹、输了会骂、被坑了会喊"这都能输"。平时也会分享沙雕视频、吐槽工作和生活。说话带网感但不刻意玩梗，兴奋时消息一条接一条，安静时半天憋不出一个屁。' },
-        // ---------- ♀ 我是女生 · 伴侣向 ----------
-        'f_p_warm': { name: '温柔体贴男友', gender: 'female', role: '伴侣',
-            tags: ['温柔', '体贴', '细心', '包容', '倾听', '男友力'],
-            desc: '我是你现在的男朋友，温柔细心，会照顾你的情绪，但不舔狗、不说教、不油腻。你难过了我先听你说完，再陪你想办法；你开心了我陪你闹。平时会记得你随口提的小事，关心落在行动上（给你点吃的、提醒你带伞）。说话自然，像真人对象发微信，该开玩笑开玩笑，该认真认真。' },
-        'f_p_cold': { name: '高冷腹黑男友', gender: 'female', role: '伴侣',
-            tags: ['高冷', '腹黑', '占有欲', '嘴毒', '护短', '反差'],
-            desc: '我是你的男朋友，表面上高冷话少、不爱表达，其实心里全是你。嘴上毒你两句，转头把你护得死死的；你被别人欺负我第一个站出来。占有欲强但不会太夸张，吃醋了不直说，会用阴阳的语气试探你。聊天惜字如金但每句都在点子上，偶尔一句关心能让你愣半天。' },
-        'f_p_sun': { name: '阳光直球男友', gender: 'female', role: '伴侣',
-            tags: ['阳光', '运动', '开朗', '直球', '粘人', '少年感'],
-            desc: '我是你的男朋友，阳光开朗、藏不住事。喜欢你就直说，想你也会直接讲，偶尔撒个娇但不油腻。爱运动、爱出去玩，会拉着你一起。情绪全写在脸上，生气了直接说，不冷战。语气轻快自然，像热恋中的大男孩给对象发微信，不端不装，有少年感。' },
-        // ---------- ♀ 我是女生 · 朋友向 ----------
-        'f_f_guimi': { name: '无话不谈闺蜜', gender: 'female', role: '朋友',
-            tags: ['闺蜜', '八卦', '贴心', '吐槽', '逛街', '仗义'],
-            desc: '我是你最好的闺蜜，什么都能聊：八卦、感情、工作、逛街。帮你分析感情问题、陪你骂渣男、给你出主意，但不会替你做决定。说话直接不端着，关心你但不肉麻，像认识很多年的姐妹。你高兴我陪你疯，你难过我陪你哭，然后带你吃饭。' },
-        'f_f_dushe': { name: '毒舌互损闺蜜', gender: 'female', role: '朋友',
-            tags: ['毒舌', '互怼', '爽快', '闺蜜', '损友', '直言'],
-            desc: '我是你的损友闺蜜，嘴上不饶人，但永远站在你这边。你犯花痴我泼冷水，你受委屈我第一个骂回去。我们日常就是互怼，谁也不让谁，但真有事对方一个电话就到。说话快、直接、不装温柔，讨厌磨叽和矫情。' },
-        'f_f_tree': { name: '温柔树洞姐妹', gender: 'female', role: '朋友',
-            tags: ['温柔', '倾听', '安慰', '细腻', '共情', '安静'],
-            desc: '我是你的知心姐妹，安静温柔，很会听人说话。你倾诉我不会打断、不会急着给建议，先接住你的情绪，等你想要了再陪你分析。共情力强，你开心我也开心。说话轻声细语但不做作，不灌鸡汤，不评价你的选择，只是陪着你。' },
+        'xiaoxi': { name: '小栖', gender: '', role: '朋友',
+            tags: ['温柔', '倾听', '陪伴', '自然', '日常'],
+            desc: '我是小栖，一个住在这个城市里的普通朋友：有自己的工作和小日子，不端着，也不装 AI。聊天就像微信里认识很久的朋友——想到一句发一句，短句为主，直接自然。你说的正事我会接住，你吐槽我跟着吐槽，你开心我陪你开心；不教育人，不煽情，不每句都带语气词。' },
     };
 
     const PRESET_GROUPS = [
-        { label: '♂ 我是男生 · 伴侣向', ids: ['m_p_warm', 'm_p_tsun', 'm_p_yuanqi'] },
-        { label: '♂ 我是男生 · 朋友向', ids: ['m_f_bro', 'm_f_laoge', 'm_f_game'] },
-        { label: '♀ 我是女生 · 伴侣向', ids: ['f_p_warm', 'f_p_cold', 'f_p_sun'] },
-        { label: '♀ 我是女生 · 朋友向', ids: ['f_f_guimi', 'f_f_dushe', 'f_f_tree'] },
+        { label: '默认预设', ids: ['xiaoxi'] },
     ];
 
     const MBTI_DIMS = [
@@ -1287,6 +1454,9 @@
             this.loadUserProfile();
             this._bindTopbarScroll();
             this.connectEventStream();
+            // 支持 ?view=help 直接打开某个板块（也方便自动化验收）
+            const _v = new URLSearchParams(location.search).get('view');
+            if (_v) this.switchView(_v);
         },
 
         renderCombos() {
@@ -1398,8 +1568,17 @@
             document.getElementById(displayId).textContent = tags.length > 0 ? tags.join('、') : '无';
         },
 
-        avatarHtml(avatar, name) {
+        // 头像：优先用内置 SVG（window.QiyuAvatars），currentColor 跟随容器文字色；
+        // char 可省略，省略时按 avatar 文件名/角色名稳定映射（同一角色永远同一枚）
+        avatarHtml(avatar, name, char) {
             const escName = this.esc(name);
+            const QAv = window.QiyuAvatars;
+            if (QAv && typeof QAv.html === 'function') {
+                try {
+                    const inner = QAv.html(char || { avatar, name });
+                    if (inner) return inner;
+                } catch (e) { /* 头像失败绝不能影响渲染 */ }
+            }
             if (!avatar) return escName;
             return `<img src="${API_BASE}/avatars/${encodeURIComponent(avatar)}" alt="${escName}" onerror="this.outerHTML='${escName.replace(/'/g, '&#39;')}'">`;
         },
@@ -1417,12 +1596,23 @@
         renderAvatarPicker(pickerId, inputId, current) {
             const picker = document.getElementById(pickerId);
             if (!picker) return;
-            const avatars = this.state.avatars || [];
-            if (avatars.length === 0) { picker.innerHTML = '<span style="font-size:0.8rem;color:var(--text-tertiary);">暂无头像，可上传自定义图片</span>'; return; }
-            picker.innerHTML = avatars.map(a => {
+            const parts = [];
+            // 内置 12 枚头像（personas SVG，随包分发；后端 /v1/avatars 只列上传目录，拿不到它们）
+            const QAv = window.QiyuAvatars;
+            const builtin = (QAv && Array.isArray(QAv.list)) ? QAv.list : [];
+            builtin.forEach((id) => {
+                const sel = id === current ? ' selected' : '';
+                const svg = (QAv && QAv.svg) ? QAv.svg(id) : `<img src="/static/avatars/${id}.png" alt="${id}">`;
+                parts.push(`<div class="avatar-option builtin${sel}" title="${id}" onclick="app.selectAvatar('${inputId}','${pickerId}','${id}')">${svg}</div>`);
+            });
+            // 用户自己上传的图片（老的内置 default_XX.png / aXX.png 不再显示——已被内置 SVG 取代）
+            (this.state.avatars || []).forEach((a) => {
+                if (/^(?:default_\d+|a\d+)\.(?:png|jpe?g|webp|gif)$/i.test(String(a))) return;
                 const sel = a === current ? ' selected' : '';
-                return `<div class="avatar-option${sel}" title="${this.esc(a)}" onclick="app.selectAvatar('${inputId}','${pickerId}','${a}')"><img src="${API_BASE}/avatars/${encodeURIComponent(a)}" alt="${this.esc(a)}"></div>`;
-            }).join('');
+                parts.push(`<div class="avatar-option${sel}" title="${this.esc(a)}" onclick="app.selectAvatar('${inputId}','${pickerId}','${a}')"><img src="${API_BASE}/avatars/${encodeURIComponent(a)}" alt="${this.esc(a)}"></div>`);
+            });
+            picker.innerHTML = parts.length ? parts.join('')
+                : '<span style="font-size:0.8rem;color:var(--text-tertiary);">暂无头像，可上传自定义图片</span>';
         },
 
         selectAvatar(inputId, pickerId, name) {
@@ -1724,16 +1914,60 @@
             } catch (e) { this.toast('保存失败: ' + e.message, 'error'); }
         },
 
-        // ============ 用户性别向（男/女）============
+        // ============ 用户性别（男 / 女 / 跨性别 / 自定义）============
         renderGenderSegs(v) {
+            const val = String(v || '');
+            const preset = ['male', 'female', 'nonbinary'];
             ['welcomeGenderSeg', 'profileGenderSeg', 'editProfileGenderSeg'].forEach(id => {
                 const el = document.getElementById(id);
                 if (!el) return;
-                el.querySelectorAll('.gseg').forEach(b => b.classList.toggle('active', String(b.dataset.v || '') === String(v || '')));
+                el.querySelectorAll('.gseg').forEach(b => {
+                    const bv = String(b.dataset.v || '');
+                    let on = bv === val;
+                    // 自定义：值既不是预设也不是空 → 高亮「自定义」
+                    if (bv === 'custom' && val && preset.indexOf(val) < 0) on = true;
+                    b.classList.toggle('active', on);
+                });
             });
+            const box = document.getElementById('genderCustomInput');
+            if (box) {
+                const isCustom = !!val && preset.indexOf(val) < 0;
+                box.style.display = isCustom ? 'block' : 'none';
+                if (isCustom && document.activeElement !== box) box.value = val;
+            }
         },
 
-        async setUserGender(v) {
+        toggleGenderCustom() {
+            const box = document.getElementById('genderCustomInput');
+            if (!box) return;
+            const willShow = box.style.display === 'none' || !box.style.display;
+            box.style.display = willShow ? 'block' : 'none';
+            if (willShow) {
+                box.focus();
+            } else {
+                this.setUserGender('', true);
+            }
+        },
+
+        // ============ 导出 qy3（人设 + 记忆，不加密）============
+        exportCurrentQy3() {
+            const char = this.state.currentCharacter;
+            if (!char || !char.id) {
+                this.toast('先选一个角色再导出', 'error');
+                return;
+            }
+            const url = `/v1/characters/${encodeURIComponent(char.id)}/export.qy3`;
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${char.name || char.id}.qy3f`;
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => a.remove(), 1000);
+            this.toast('已开始导出 .qy3f（人设 + 记忆，不加密）', 'success');
+        },
+
+        async setUserGender(v, silent) {
             const g = (v || '').toString().trim();
             if (!this.state.settings) this.state.settings = {};
             this.state.settings.user_gender = g;
@@ -1741,7 +1975,9 @@
             try {
                 await this.api('POST', '/v1/settings', { user_gender: g });
                 this.state.llmVerified = false;
-                this.toast(g === 'male' ? '已设为「我是男生」，新生成的伴侣/朋友人设会按此预设' : g === 'female' ? '已设为「我是女生」，新生成的伴侣/朋友人设会按此预设' : '已清除性别设置', 'success');
+                if (silent) return;      // 自定义输入框逐字保存时不要每次都弹 toast
+                const label = { male: '男', female: '女', nonbinary: '跨性别' }[g] || (g ? `「${g}」` : '未设置');
+                this.toast(`性别已设为${label}，新生成的人设会按此预设`, 'success');
             } catch (e) {
                 this.toast('保存失败: ' + e.message, 'error');
             }
@@ -1797,7 +2033,7 @@
                 const hasResume = char.resume && Object.keys(char.resume).length > 0;
                 const indexBtn = hasResume ? `<button class="btn btn-secondary btn-xs" onclick="event.stopPropagation();app.indexResume('${char.id}')" title="把结构化简历写入 RAG 知识库">简历入RAG</button>` : '';
                 return `<div class="char-card ${isSelected ? 'selected' : ''}" style="--card-color:${color}" data-id="${char.id}">
-                    <div class="char-card-header"><div class="char-card-avatar" style="background:${color}">${this.avatarHtml(char.avatar, char.name[0])}</div><div style="min-width:0;"><div class="char-card-name">${this.esc(char.name)}</div><div class="char-card-tagline">${this.esc(char.tagline || '')}</div></div></div>
+                    <div class="char-card-header"><div class="char-card-avatar" style="background:${color}">${this.avatarHtml(char.avatar, char.name[0], char)}</div><div style="min-width:0;"><div class="char-card-name">${this.esc(char.name)}</div><div class="char-card-tagline">${this.esc(char.tagline || '')}</div></div></div>
                     <div class="char-card-desc">${this.esc(desc)}</div>
                     <div class="char-card-meta">${kwTags}<span class="badge badge-primary">${parseFloat(temp).toFixed(2)}</span></div>
                     <div class="char-card-actions"><button class="btn btn-primary btn-xs" onclick="event.stopPropagation();app.selectCharacter('${char.id}')">开始聊天</button>${indexBtn}<button class="btn btn-secondary btn-xs" onclick="event.stopPropagation();app.editCharacter('${char.id}')">编辑</button><button class="btn btn-danger btn-xs" onclick="event.stopPropagation();app.deleteCharacter('${char.id}')">删除</button></div>
@@ -1869,8 +2105,12 @@
                             this.state.generatedResume = ev.resume || {};
                             this.state.generatedParams = ev.params || {};
                             if (ev.params && Object.keys(ev.params).length) this.applyPersonaParamsUnset(ev.params, 'pp');
-                            // 生成完成自动回填人格描述（仍可手动修改）
-                            if (this.state.generatedCard) document.getElementById('charDesc').value = this.state.generatedCard;
+                            // 生成完成自动回填“自然人格描述”，不要把结构化简历原样塞进去
+                            if (this.state.generatedCard) {
+                                document.getElementById('charDesc').value = this.buildPersonaText(this.state.generatedResume);
+                                const _n = this._resumeName(this.state.generatedResume);
+                                if (_n && !document.getElementById('charName').value.trim()) document.getElementById('charName').value = _n;
+                            }
                         } else if (ev.type === 'error') {
                             throw new Error(ev.message || '生成失败');
                         }
@@ -1905,6 +2145,36 @@
             }
         },
 
+        buildPersonaText(resume) {
+            const r = resume || {};
+            const clean = (s) => String(s || '')
+                .replace(/\s*\|\s*/g, '；')
+                .replace(/=/g, '：')
+                .replace(/；{2,}/g, '；')
+                .trim();
+            const basic = clean(r['基本信息']);
+            const nameMatch = basic.match(/姓名：([^；]+)/);
+            const name = nameMatch ? nameMatch[1].trim() : '这个角色';
+            const parts = [];
+            if (basic) parts.push('基本信息：' + basic);
+            const personality = clean(r['性格']);
+            if (personality) parts.push('性格和习惯：' + personality);
+            const daily = clean(r['爱好日常']);
+            if (daily) parts.push('日常：' + daily);
+            const relation = clean(r['关系定位']);
+            if (relation) parts.push('和用户的关系：' + relation);
+            const self = clean(r['对话自我表述']);
+            if (self) parts.push('说话方式：' + self);
+            return '你叫' + name + '。\n' + parts.join('\n') +
+                '\n这些是你的生活事实，不要把它们当设定条目逐条背给用户；聊天时按这些事实自然反应。';
+        },
+
+        _resumeName(resume) {
+            const basic = String((resume || {})['基本信息'] || '');
+            const m = basic.match(/姓名[=：]([^ |；]+)/);
+            return m ? m[1].trim() : '';
+        },
+
         copyResume() {
             const r = this.state.generatedResume || {};
             const text = JSON.stringify(r, null, 2);
@@ -1935,8 +2205,10 @@
 
         useGeneratedCard() {
             if (!this.state.generatedCard) return;
-            document.getElementById('charDesc').value = this.state.generatedCard;
-            this.toast('已填入人格描述', 'success');
+            document.getElementById('charDesc').value = this.buildPersonaText(this.state.generatedResume);
+            const n = this._resumeName(this.state.generatedResume);
+            if (n && !document.getElementById('charName').value.trim()) document.getElementById('charName').value = n;
+            this.toast('已填入自然人格描述', 'success');
         },
 
         async saveCharacter() {
@@ -2030,7 +2302,7 @@
             if (char) {
                 const color = char.avatar_color || getAvatarColor(char.name);
                 const sidebarAvatar = document.getElementById('sidebarCharAvatar');
-                sidebarAvatar.innerHTML = this.avatarHtml(char.avatar, char.name[0]);
+                sidebarAvatar.innerHTML = this.avatarHtml(char.avatar, char.name[0], char);
                 sidebarAvatar.style.background = color;
                 document.getElementById('sidebarCharName').textContent = char.name;
                 infoEl.style.display = 'flex'; noEl.style.display = 'none';
@@ -2096,7 +2368,8 @@
         },
 
         async deleteCharacter(id) {
-            if (!confirm('确定要删除这个角色吗？此操作不可撤销。')) return;
+            if (!(await QyuDialog.confirm('确定要删除这个角色吗？此操作不可撤销。',
+                    { title: '删除角色', danger: true, okText: '删除' }))) return;
             try {
                 await this.api('DELETE', `/v1/characters/${id}`);
                 this.toast('角色已删除', 'success');
@@ -2125,7 +2398,7 @@
             if (char) {
                 // 已选角色：显示聊天界面
                 const color = char.avatar_color || getAvatarColor(char.name);
-                avatar.innerHTML = this.avatarHtml(char.avatar, char.name[0]); avatar.style.background = color;
+                avatar.innerHTML = this.avatarHtml(char.avatar, char.name[0], char); avatar.style.background = color;
                 name.textContent = char.name; status.textContent = char.tagline ? '· ' + char.tagline : '在线';
                 document.getElementById('chatInput').placeholder = `和 ${char.name} 说点什么...`;
 
@@ -2140,7 +2413,7 @@
             } else {
                 // 未选角色：显示欢迎引导
                 avatar.innerHTML = ''; avatar.style.background = 'transparent';
-                name.textContent = '栖语demo'; status.textContent = '';
+                name.textContent = '栖语 Qiyu'; status.textContent = '';
 
                 welcomeCard.style.display = 'flex';
                 messagesArea.classList.add('chat-state-hidden');
@@ -2342,9 +2615,9 @@
                         if (delta.reasoning_content) fullReason += delta.reasoning_content;
                         if (p.type === 'assistant_messages') {
                             if (p.partial && Array.isArray(p.messages) && p.messages.length) {
-                                // 增量流式：解析到一条就立刻排队播放（前端按 delay 逐条显示）
-                                this._playedPartial = (this._playedPartial || 0) + p.messages.length;
-                                this._enqueuePlayback(p.messages, null, sendCharId);
+                                // 增量 JSON 还在变化：同一条可能先被解析成「嗯 说吧」再变成「嗯」「说吧」，
+                                // 直接播放会重复。这里只等最终事件，一次性按最终分条播放。
+                                this._playedPartial = 0;
                             } else {
                                 batchMessages = p;
                             }
@@ -2362,7 +2635,8 @@
                 if (batchMessages && Array.isArray(batchMessages.messages)) {
                     if (batchMessages.relation) this.updateRelationBadge(batchMessages.relation);
                     if (batchMessages.emotion) this.updateEmotionChip(batchMessages.emotion);
-                    const rest = batchMessages.messages.slice(this._playedPartial || 0);
+                    // partial 只用于状态提示，不提前播放；最终消息整体播放，避免重复
+                    const rest = batchMessages.messages.slice(0);
                     if (rest.length) this._enqueuePlayback(rest, fullReason, sendCharId);
                     // 思考过程：等流结束后补到第一条助手消息上（增量首条可能已先播）
                     if (fullReason && this._isCharActive(sendCharId)) {
@@ -2465,7 +2739,10 @@
                                 // 微信通道绑定角色与当前查看角色不一致时，先自动切到该角色再刷新
                                 const ok = await this._ensureEventCharacter(d);
                                 const cid = ok && d.char_id ? d.char_id : ((this.state.currentCharacter && this.state.currentCharacter.id) || '');
-                                if (cid) await this.loadChatHistory(cid);
+                                // 直播/逐条播放期间不要用历史覆盖，否则会和还在队列里的气泡重复
+                                if (cid && !this._inFlight && !this._playbackActive && !(this._playQueue || []).length) {
+                                    await this.loadChatHistory(cid);
+                                }
                                 this.loadMemories();
                                 this.loadEmotion();
                             } else if (d.notify && d.user_id && d.user_id !== 'web_user') {
@@ -2542,7 +2819,7 @@
             const char = this.state.currentCharacter;
             const color = char ? (char.avatar_color || getAvatarColor(char.name)) : '#888';
             const name = char ? char.name[0] : 'AI';
-            const avatar = char ? this.avatarHtml(char.avatar, name) : name;
+            const avatar = char ? this.avatarHtml(char.avatar, name, char) : name;
             const div = document.createElement('div'); div.className = 'msg assistant typing-indicator'; div.id = 'typingIndicator';
             div.innerHTML = `<div class="msg-avatar" style="background:${color}">${avatar}</div><div class="msg-content"><div class="typing-dots"><span></span><span></span><span></span></div></div>`;
             // 等待输出泡泡显示在用户最后一条消息正下方（像真人正在回复那条），而不是飘到列表底部
@@ -2558,9 +2835,6 @@
             if (msg.images && msg.images.length) {
                 html += `<div style="display:flex;gap:6px;flex-wrap:wrap;margin:2px 0 6px;">${msg.images.map(src => `<img src="${src}" style="max-width:200px;max-height:200px;border-radius:12px;display:block;object-fit:cover;"/>`).join('')}</div>`;
             }
-            if (msg.reasoning) {
-                html += `<details class="think-block" ${msg.streaming ? 'open' : ''}><summary>💭 思考过程</summary><div class="think-body">${this.esc(msg.reasoning)}${msg.streaming ? '<span class="cursor">&#9646;</span>' : ''}</div></details>`;
-            }
             html += `<div class="msg-content" data-idx="${i}">${renderWxEmoji(this.esc(msg.content))}${msg.streaming ? '<span class="cursor">&#9646;</span>' : ''}</div>`;
             return html;
         },
@@ -2569,7 +2843,7 @@
             const container = document.getElementById('messagesArea');
             const char = this.state.currentCharacter;
             const charColor = char ? (char.avatar_color || getAvatarColor(char.name)) : '#888';
-            const charAvatar = char ? this.avatarHtml(char.avatar, char.name[0]) : 'AI';
+            const charAvatar = char ? this.avatarHtml(char.avatar, char.name[0], char) : 'AI';
             container.innerHTML = this.state.messages.map((msg, i) => {
                 const isUser = msg.role === 'user';
                 const color = isUser ? '#444' : charColor;
@@ -2613,15 +2887,15 @@
             const llm = s.llm || {};
             document.getElementById('settingApiUrl').value = llm.base_url || LLM_API;
             const sel = document.getElementById('settingModelSelect');
+            const modelInput = document.getElementById('settingModelInput');
+            if (modelInput) {
+                modelInput.value = '';
+                modelInput.placeholder = '自定义模型名（可选；留空则用下拉选择）';
+            }
             if (sel && llm.model) {
                 const opt = sel.querySelector(`option[value="${llm.model}"]`);
                 if (opt) opt.selected = true;
-                else {
-                    // 保存过的模型不在下拉里（列表还没刷过）：直接补一个选项并选中，免手动刷新
-                    const o = document.createElement('option');
-                    o.value = llm.model; o.textContent = llm.model;
-                    sel.appendChild(o); sel.value = llm.model;
-                }
+                // 不在列表里先不补：等 loadModelList 拉真实列表后再决定，避免下拉永远停在旧模型
             }
             this.state.settings.llm = llm;
             this.state.settings.model = llm.model || '';
@@ -2647,7 +2921,7 @@
             if (nm) nm.checked = s.night_memory_enabled !== false;
             this.state.settings.profanity_level = s.profanity_level || 'off';
             this.state.settings.naughty_level = s.naughty_level || 'off';
-            this.state.settings.thinking_level = s.thinking_level || (s.thinking_enabled ? 'mid' : 'off');
+            this.state.settings.thinking_level = 'low';
             this.state.settings.desire_base = (s.desire_base !== undefined && s.desire_base !== null) ? s.desire_base : 50;
             this.state.settings.user_gender = (s.user_gender || '').toString();
             this.renderGenderSegs(this.state.settings.user_gender);
@@ -2750,26 +3024,41 @@
         },
 
         async loadModelList(silent) {
-            const btn = (event && event.target) || document.getElementById('modelRefreshBtn');
+            // 以前这里用全局 `event`，异步调用时它是 undefined → ReferenceError 把整个函数
+            // 打断，模型下拉就永远停在初始状态（看起来"列表不加载"）。直接按 id 取按钮。
+            // 2026-10-22：改为按「设置页当前填的地址 + Key」查询；上游不可用时只报错，不再编造模型。
+            // 不再把保存的旧模型硬塞进下拉，避免"刷新了还是旧模型"。
+            const btn = document.getElementById('modelRefreshBtn');
             const sel = document.getElementById('settingModelSelect');
-            const prevHtml = sel ? sel.innerHTML : '';
+            if (!sel) return;
+            const prevHtml = sel.innerHTML;
+            const apiUrl = (document.getElementById('settingApiUrl').value || '').trim();
+            const apiKey = (document.getElementById('settingApiKey').value || '').trim();
             if (btn) { btn.disabled = true; btn.textContent = '加载中...'; }
             try {
-                const d = await this.api('GET', '/v1/models');
+                const qs = [];
+                if (apiUrl) qs.push('url=' + encodeURIComponent(apiUrl));
+                if (apiKey) qs.push('api_key=' + encodeURIComponent(apiKey));
+                const d = await this.api('GET', '/v1/models' + (qs.length ? '?' + qs.join('&') : ''));
                 const models = d.data || [];
+                const fallback = !!d.fallback;
                 const savedModel = ((this.state.settings && this.state.settings.llm && this.state.settings.llm.model) || (this.state.settings && this.state.settings.model) || '');
                 sel.innerHTML = models.length > 0
                     ? models.map(m => `<option value="${this.esc(m.id)}">${this.esc(m.id)}</option>`).join('')
-                    : '<option value="">未获取到模型列表</option>';
-                if (savedModel) {
-                    const opt = sel.querySelector(`option[value="${savedModel}"]`);
-                    if (opt) opt.selected = true;
-                    else { const o = document.createElement('option'); o.value = savedModel; o.textContent = savedModel; sel.appendChild(o); sel.value = savedModel; }
-                }
-                if (!sel.value && models.length > 0) {
+                    : '<option value="">未获取到模型列表（检查地址/Key）</option>';
+                const opt = savedModel ? sel.querySelector(`option[value="${savedModel}"]`) : null;
+                if (opt) {
+                    opt.selected = true;
+                } else if (models.length > 0) {
                     sel.options[0].selected = true;
                 }
-                if (!silent) this.toast('模型列表已更新', 'success');
+                const mi = document.getElementById('settingModelInput');
+                if (mi) mi.placeholder = '自定义模型名（可选；留空则用下拉选择）';
+                if (fallback) {
+                    if (!silent) this.toast('获取模型列表失败：' + (d.error || '接口不可用'), 'error');
+                } else if (!silent) {
+                    this.toast('模型列表已更新（' + models.length + ' 个）', 'success');
+                }
             } catch (e) {
                 if (prevHtml && sel) sel.innerHTML = prevHtml; // 拉取失败时保留已有选项，不丢已填模型
                 if (!silent) this.toast('获取模型列表失败: ' + e.message, 'error');
@@ -2805,6 +3094,8 @@
             const p = (this.state.llmPresets || []).find(x => x.id === id);
             if (!p) return;
             document.getElementById('settingApiUrl').value = p.base_url;
+            const mi = document.getElementById('settingModelInput');
+            if (mi) mi.value = '';
             const sel = document.getElementById('settingModelSelect');
             if (p.models && p.models.length) {
                 sel.innerHTML = p.models.map(m => `<option value="${this.esc(m)}">${this.esc(m)}</option>`).join('');
@@ -2825,7 +3116,8 @@
         async verifyLLM() {
             const url = document.getElementById('settingApiUrl').value.trim() || LLM_API;
             const sel = document.getElementById('settingModelSelect');
-            const model = (sel.value || '').trim() || 'qwen3.6-35b';
+            const model = ((document.getElementById('settingModelInput') || {}).value || '').trim() || (sel.value || '').trim();
+            if (!model) { this.toast('请先选择或填写模型名', 'warning'); return; }
             const apiKey = document.getElementById('settingApiKey').value.trim();
             const routeUrl = document.getElementById('settingRouteUrl').value.trim();
             const routeModel = document.getElementById('settingRouteModel').value.trim();
@@ -2883,11 +3175,17 @@
                 return;
             }
             const sel = document.getElementById('settingModelSelect');
+            const pickedModel = (((document.getElementById('settingModelInput') || {}).value || '').trim())
+                || ((sel.value || '').trim());
+            if (!pickedModel) {
+                this.toast('请先刷新模型列表并选择一个模型，或手动填写模型名', 'warning');
+                return;
+            }
             const pl = this.state.settings.profanity_level || 'off';
             const nl = this.state.settings.naughty_level || 'off';
             const settings = {
                 llm_url: document.getElementById('settingApiUrl').value.trim() || LLM_API,
-                llm_model: (sel.value || '').trim() || 'qwen3.6-35b',
+                llm_model: pickedModel,
                 llm_route_url: document.getElementById('settingRouteUrl').value.trim(),
                 llm_route_model: document.getElementById('settingRouteModel').value.trim(),
                 api_key: document.getElementById('settingApiKey').value.trim(),
@@ -2896,7 +3194,7 @@
                 allow_naughty: nl !== 'off',
                 profanity_level: pl,
                 naughty_level: nl,
-                thinking_level: this.state.settings.thinking_level || 'off',
+                thinking_level: 'low',
                 desire_base: parseInt(document.getElementById('settingDesireBase').value) || 50,
                 web_enabled: !!document.getElementById('settingWebEnabled').checked,
                 proactive_enabled: !!document.getElementById('settingProactiveEnabled').checked,
@@ -2904,7 +3202,7 @@
                 delayed_reply_enabled: !!document.getElementById('settingDelayedReply').checked,
                 day_memory_enabled: !!document.getElementById('settingDayMemory').checked,
                 night_memory_enabled: !!document.getElementById('settingNightMemory').checked,
-                show_thinking: !!document.getElementById('settingShowThinking').checked,
+                show_thinking: false,
                 user_profile: document.getElementById('userProfileInput').value.trim(),
                 user_gender: (this.state.settings.user_gender || '').toString()
             };
@@ -2928,7 +3226,12 @@
                 contents.forEach(el => el.classList.toggle('active', el.dataset.tabContent === tab));
             }
             if (tab === 'rag') { this.loadRagDocuments(); }
-            if (tab === 'wechat') { this.loadWechatStatus(); this.startChannelPolling(); }
+            if (tab === 'wechat') {
+                this.loadWechatStatus(); this.startChannelPolling(); this._updateLegalStatus();
+                if (localStorage.getItem('qy_channel_legal_v2') !== '2026-10-25') {
+                    setTimeout(() => this.openChannelLegal(false), 120);
+                }
+            }
             else { this.stopChannelPolling(); }
             if (tab === 'appearance' && document.getElementById('settingsAvatarPicker')) { this.renderAvatarPicker('settingsAvatarPicker', '', ''); }
             if (tab === 'appearance') { this.applyThemeUI(); }
@@ -2999,6 +3302,11 @@
         },
 
         async loadMemories() {
+            if (!this.state.currentCharacter) {
+                this.state.memories = []; this.state.dayMemories = []; this.state.dayEvents = [];
+                this.state.shortMemories = []; this.state.longMemories = [];
+                return;
+            }
             try {
                 const d = await this.api('GET', '/v1/memory/' + encodeURIComponent(this.state.sessionUserId || 'web_user') + '?char_id=' + encodeURIComponent((this.state.currentCharacter && this.state.currentCharacter.id) || ''));
                 this.state.memories = d.data || [];
@@ -3012,6 +3320,10 @@
         },
 
         renderMemories() {
+            // 侧栏 DOM 已交给 memory_panel.js：转发刷新，旧渲染代码保留但不再执行
+            if (window.QiyuMemoryPanel) {
+                try { return window.QiyuMemoryPanel.refresh(); } catch (e) { console.warn('[记忆面板]', e); }
+            }
             const container = document.getElementById('memoryList');
             const secTitle = (t, sub) => `<div style="display:flex;align-items:center;justify-content:space-between;margin:14px 2px 8px;"><span style="font-size:0.78rem;font-weight:700;color:var(--text-secondary);letter-spacing:.3px;">${t}</span>${sub ? `<span style="font-size:0.68rem;color:var(--text-muted);">${sub}</span>` : ''}</div>`;
             const card = (text, time, delBtn) => `<div style="padding:10px 12px;border-radius:var(--radius-md);background:var(--bg-elevated);border:1px solid var(--border);margin-bottom:6px;"><div style="font-size:0.82rem;color:var(--text-primary);line-height:1.5;word-break:break-word;">${this.esc(text)}</div><div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;font-size:0.7rem;color:var(--text-muted);"><span>${time}</span>${delBtn || ''}</div></div>`;
@@ -3062,6 +3374,7 @@
 
         async addMemory() {
             const textarea = document.getElementById('newMemoryText');
+            if (!textarea) { this.toast('请用右侧记忆面板添加', 'info'); return; }
             const text = textarea.value.trim(); if (!text) { this.toast('请输入记忆内容', 'error'); return; }
             const cid = (this.state.currentCharacter && this.state.currentCharacter.id) || '';
             try { await this.api('POST', '/v1/memory/' + encodeURIComponent(this.state.sessionUserId || 'web_user') + '?char_id=' + encodeURIComponent(cid), { text: text, tags: [] }); this.toast('记忆已添加', 'success'); textarea.value = ''; this.loadMemories(); }
@@ -3069,14 +3382,17 @@
         },
 
         async deleteMemory(id) {
-            if (!confirm('确定要删除这条记忆吗？')) return;
+            if (!(await QyuDialog.confirm('确定要删除这条记忆吗？',
+                    { title: '删除记忆', danger: true, okText: '删除' }))) return;
             const cid = (this.state.currentCharacter && this.state.currentCharacter.id) || '';
             try { await this.api('DELETE', `/v1/memory/${encodeURIComponent(this.state.sessionUserId || 'web_user')}/${id}?char_id=` + encodeURIComponent(cid)); this.toast('记忆已删除', 'success'); this.loadMemories(); }
             catch (e) { this.toast('删除失败: ' + e.message, 'error'); }
         },
 
         async clearMemories() {
-            document.getElementById('clearDayCb').checked = true;
+            const _cb = document.getElementById('clearDayCb');
+            if (!_cb) { this.toast('清空入口已经移到右侧记忆面板', 'info'); return; }
+            _cb.checked = true;
             document.getElementById('clearShortCb').checked = false;
             document.getElementById('clearLongCb').checked = false;
             this.openModal('clearMemoryModal');
@@ -3107,7 +3423,9 @@
         },
 
         async searchMemories() {
-            const query = document.getElementById('memorySearchInput').value.trim();
+            const _box = document.getElementById('memorySearchInput');
+            if (!_box) { this.loadMemories(); return; }   // 面板自带搜索
+            const query = _box.value.trim();
             if (!query) { this.loadMemories(); return; }
             try {
                 const d = await this.api('GET', '/v1/memory/' + encodeURIComponent(this.state.sessionUserId || 'web_user') + '?char_id=' + encodeURIComponent((this.state.currentCharacter && this.state.currentCharacter.id) || ''));
@@ -3153,6 +3471,7 @@
         },
 
         async loadChannels() {
+            this._updateLegalStatus();
             try {
                 const d = await this.api('GET', '/v1/channels/list');
                 const list = (d && d.data) || [];
@@ -3229,20 +3548,36 @@
             return `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
         },
 
+        channelConfigured(c) {
+            const cfg = c.config || {};
+            if (c.kind === 'wecom') return !!(cfg.corp_id && cfg.agent_id && cfg.secret);
+            if (c.kind === 'qqbot') return !!(cfg.app_id && cfg.app_secret);
+            if (c.kind === 'feishu') return !!((cfg.app_id && cfg.app_secret) || cfg.webhook);
+            return true;
+        },
+
         channelStatusInfo(c) {
-            if (!c.integrated) return { dot: 'off', text: '预留' };
+            if (!c.integrated) return { dot: 'off', text: '未接入' };
             if (c.running) return { dot: 'on', text: '运行中' };
             if (c.qr_status === 'waiting' || c.qr_status === 'scanned') return { dot: 'wait', text: '扫码中' };
             if (c.qr_status === 'error') return { dot: 'wait', text: '异常' };
-            return { dot: 'off', text: '已停止' };
+            if (['wecom', 'qqbot', 'feishu'].includes(c.kind)) {
+                return this.channelConfigured(c)
+                    ? { dot: 'wait', text: '待启动' }
+                    : { dot: 'wait', text: '待配置' };
+            }
+            return { dot: 'off', text: '未连接' };
         },
 
         channelModeLabel(c) {
+            if (!c.integrated) return '未接入';
             if (c.mode === 'clawbot') return 'ClawBot';
-            if (c.mode === 'wechatauto') return '本机接管';
             if (c.mode === 'wechaty') return 'Wechaty';
             if (c.mode === 'itchat') return '单账号';
-            return '预留';
+            if (c.kind === 'wecom') return '企业微信应用';
+            if (c.kind === 'qqbot') return 'QQ 官方 Bot';
+            if (c.kind === 'feishu') return '飞书应用';
+            return '已接入';
         },
 
         renderChannels() {
@@ -3291,6 +3626,7 @@
                 const expired = !c.running && /过期|失效/.test(c.qr_message || '');
                 actionsHtml = `<div class="channel-actions">
                     ${c.running ? `<button class="btn btn-danger" onclick="app.stopChannel('${c.id}')">停止</button>` : `<button class="btn btn-primary" onclick="app.startChannel('${c.id}', ${(waiting || expired)})">${(waiting || expired) ? '重新扫码' : '启动'}</button>`}
+                    ${['wecom', 'qqbot', 'feishu'].includes(c.kind) ? `<button class="btn btn-secondary" onclick="app.selftestChannel('${c.id}')">自检</button>` : ''}
                     <button class="btn btn-secondary" onclick="app.resetChannel('${c.id}')" title="清空登录态，切换微信号/重新扫码">重置连接（切换账号）</button>
                     <button class="btn btn-secondary" onclick="app.loadChannels()">刷新</button>
                 </div>`;
@@ -3298,7 +3634,7 @@
             return `<div class="channel-card">
                 <div class="channel-card-head">
                     <div class="channel-icon ${iconCls}">${this.channelIcon(c)}</div>
-                    <div><div class="channel-name">${this.esc(c.name)}<span class="channel-mode-badge ${modeCls}">${this.channelModeLabel(c)}</span></div><div class="channel-desc">${this.esc(c.qr_message || (c.integrated ? '状态正常' : '预留通道，配置位已就绪'))}</div></div>
+                    <div><div class="channel-name">${this.esc(c.name)}<span class="channel-mode-badge ${modeCls}">${this.channelModeLabel(c)}</span></div><div class="channel-desc">${this.esc(c.qr_message || (!c.integrated ? '未接入通道' : (this.channelConfigured(c) ? '已接入' : '已接入，待配置')))}</div></div>
                     <div class="channel-status"><span class="status-dot ${st.dot}"></span>${st.text}</div>
                 </div>
                 ${qrHtml}
@@ -3307,7 +3643,94 @@
             </div>`;
         },
 
+        legalAccepted() {
+            const ok = localStorage.getItem('qy_channel_legal_v2') === '2026-10-25';
+            if (!ok) {
+                this.openChannelLegal(true);
+                this.toast('请先完整阅读并滚动到底部确认外部通讯协议', 'error');
+                return false;
+            }
+            return true;
+        },
+
+        _legalAtBottom() {
+            const body = document.getElementById('channelLegalBody');
+            if (!body) return false;
+            return (body.scrollHeight - body.scrollTop - body.clientHeight) <= 8;
+        },
+
+        updateChannelLegalScroll() {
+            const bottom = this._legalAtBottom();
+            const agree = document.getElementById('channelLegalAgree');
+            const confirm = document.getElementById('channelLegalConfirm');
+            const hint = document.getElementById('legalScrollHint');
+            if (agree) agree.disabled = !bottom;
+            if (confirm) confirm.disabled = !(bottom && agree && agree.checked);
+            if (hint) hint.textContent = bottom ? '已滚动到底部' : '请滚动到底部';
+        },
+
+        async openChannelLegal(force = false) {
+            const modal = document.getElementById('channelLegalModal');
+            if (!modal) return;
+            modal.classList.add('show');
+            const body = document.getElementById('channelLegalBody');
+            const agree = document.getElementById('channelLegalAgree');
+            const confirm = document.getElementById('channelLegalConfirm');
+            const hint = document.getElementById('legalScrollHint');
+            if (agree) agree.checked = false;
+            if (confirm) confirm.disabled = true;
+            if (hint) hint.textContent = '请滚动到底部';
+            if (!this._legalTextLoaded || !this._legalText) {
+                body.textContent = '正在加载完整协议…';
+                try {
+                    const r = await fetch('/static/channel_legal.txt?v=2026-10-25');
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    this._legalText = await r.text();
+                    this._legalTextLoaded = true;
+                } catch (e) {
+                    body.textContent = '协议文本加载失败，请检查安装包是否包含 /static/channel_legal.txt。错误：' + e.message;
+                    return;
+                }
+            }
+            body.textContent = this._legalText;
+            body.scrollTop = 0;
+            body.onscroll = () => this.updateChannelLegalScroll();
+            requestAnimationFrame(() => this.updateChannelLegalScroll());
+        },
+
+        closeChannelLegal() {
+            const modal = document.getElementById('channelLegalModal');
+            if (modal) modal.classList.remove('show');
+            if (localStorage.getItem('qy_channel_legal_v2') !== '2026-10-25') {
+                this.toast('未确认协议，暂不能配置外部通道', 'info');
+            }
+        },
+
+        confirmChannelLegal() {
+            const agree = document.getElementById('channelLegalAgree');
+            if (!agree || !agree.checked || !this._legalAtBottom()) {
+                this.toast('请先滚动到协议底部并勾选同意', 'error');
+                return;
+            }
+            localStorage.setItem('qy_channel_legal_v2', '2026-10-25');
+            this.closeChannelLegal();
+            const status = document.getElementById('legalAcceptStatus');
+            if (status) { status.textContent = '已确认 v2026-10-25'; status.style.color = '#10b981'; }
+            this.toast('协议已确认，可以配置外部通道', 'success');
+        },
+
+        _updateLegalStatus() {
+            const status = document.getElementById('legalAcceptStatus');
+            if (!status) return;
+            if (localStorage.getItem('qy_channel_legal_v2') === '2026-10-25') {
+                status.textContent = '已确认 v2026-10-25'; status.style.color = '#10b981';
+            } else {
+                status.textContent = '未确认'; status.style.color = 'var(--text-muted)';
+            }
+        },
+
         async startChannel(id, forceScan) {
+            if (!this.legalAccepted()) return;
             try {
                 // 普通「启动」优先复用上次登录态（免扫码）；「重新扫码」才强制拉新二维码
                 const d = await this.api('POST', '/v1/channels/' + id + '/start', { force: !!forceScan });
@@ -3323,8 +3746,19 @@
             catch (e) { this.toast('停止失败: ' + e.message, 'error'); }
         },
 
+        async selftestChannel(id) {
+            try {
+                const d = await this.api('POST', '/v1/channels/' + id + '/selftest');
+                const ok = !!(d && d.success);
+                this.toast((ok ? '✓ ' : '✗ ') + ((d && d.message) || '自检完成'), ok ? 'success' : 'error');
+                this.loadChannels();
+            } catch (e) { this.toast('自检失败: ' + e.message, 'error'); }
+        },
+
         async resetChannel(id) {
-            if (!confirm('确定重置该通道连接吗？将清空当前登录态并退出登录，下次启动需重新扫码（切换微信号用）。')) return;
+            if (!(await QyuDialog.confirm(
+                    '确定重置该通道连接吗？将清空当前登录态并退出登录，下次启动需重新扫码（切换微信号用）。',
+                    { title: '重置通道', danger: true, okText: '重置' }))) return;
             try {
                 const d = await this.api('POST', '/v1/channels/' + id + '/reset');
                 this.toast((d && d.message) || '已重置连接', 'success');
@@ -3333,6 +3767,7 @@
         },
 
         async saveChannelConfig(id) {
+            if (!this.legalAccepted()) return;
             const card = this.state.channels.find(c => c.id === id);
             if (!card || !card.config_schema) return;
             const payload = {};
@@ -3377,8 +3812,118 @@
         }
     };
 
-    document.addEventListener('DOMContentLoaded', () => app.init());
+    // ===== 角色认知模式（角色扮演 / 驻留智能体 / 跟随默认）=====
+// 数据落点：persona_params.cognition_mode。「跟随默认」= 不写该键（PATCH 传 null 删键）。
+// 三选一互斥：点哪个就只显示哪个模式的说明，另外两段自动隐藏。
+(function () {
+    const MODES = ['roleplay', 'resident', 'default'];
+    let currentMode = 'default';
+
+    const normalize = (v) => {
+        const s = (v === null || v === undefined) ? '' : String(v).trim().toLowerCase();
+        return (s === 'roleplay' || s === 'resident') ? s : 'default';
+    };
+
+    app.renderCognition = function (mode) {
+        const m = MODES.includes(mode) ? mode : 'default';
+        currentMode = m;
+        document.querySelectorAll('#eppCognitionOptions .cognition-opt').forEach(el => {
+            el.classList.toggle('active', el.dataset.mode === m);
+        });
+        document.querySelectorAll('#eppCognitionHint .cognition-hint-item').forEach(el => {
+            el.classList.toggle('active', el.dataset.mode === m);
+        });
+    };
+
+    app.setCognitionMode = async function (mode) {
+        const m = normalize(mode);
+        app.renderCognition(m);
+        const id = (document.getElementById('editCharId') || {}).value;
+        if (!id) { app.toast('先打开角色编辑再切换', 'info'); return; }
+        try {
+            const d = await app.api('PATCH', `/v1/characters/${encodeURIComponent(id)}`, {
+                persona_params: { cognition_mode: m === 'default' ? null : m }
+            });
+            const ch = (app.state.characters || []).find(c => c.id === id);
+            if (ch && d && d.character) ch.persona_params = d.character.persona_params;
+            app.toast(m === 'resident' ? '她现在是「驻留智能体」'
+                   : m === 'roleplay' ? '她现在是「角色扮演」'
+                   : '已跟随默认（角色扮演）', 'success');
+        } catch (e) {
+            app.toast('保存失败：' + e.message, 'error');
+        }
+    };
+
+    const _applyPersonaParams = app.applyPersonaParams.bind(app);
+    app.applyPersonaParams = function (params, prefix) {
+        _applyPersonaParams(params, prefix);
+        if (prefix === 'epp') app.renderCognition(normalize((params || {}).cognition_mode));
+    };
+
+    const _editCharacter = app.editCharacter.bind(app);
+    app.editCharacter = function (id) {
+        _editCharacter(id);
+        const ch = (app.state.characters || []).find(c => c.id === id) || {};
+        app.renderCognition(normalize((ch.persona_params || {}).cognition_mode));
+    };
+
+    const _readPersonaParams = app.readPersonaParams.bind(app);
+    app.readPersonaParams = function (prefix) {
+        const out = _readPersonaParams(prefix) || {};
+        if (prefix === 'epp') {
+            if (currentMode === 'default') delete out.cognition_mode;
+            else out.cognition_mode = currentMode;
+        }
+        return out;
+    };
+
+    document.addEventListener('DOMContentLoaded', () => app.renderCognition('default'));
+})();
+
+document.addEventListener('DOMContentLoaded', () => app.init());
+
+    // ===== 记忆面板挂载（独立文件 memory_panel.js）=====
+    // 面板自己拉 /v1/memory，切角色/每轮回复后靠 app.loadMemories() 转发刷新。
+    document.addEventListener('DOMContentLoaded', () => {
+        if (!window.QiyuMemoryPanel) return;
+        try {
+            window.QiyuMemoryPanel.mount(document.getElementById('memoryPanelRoot'), {
+                getCharId: () => (app.state.currentCharacter && app.state.currentCharacter.id) || '',
+                getUserId: () => app.state.sessionUserId || 'web_user',
+                onExport: () => app.exportCurrentQy3(),
+                onClear: () => app.clearMemories(),
+                onSummary: () => app.generateSummary(),
+                onToast: (msg, type) => app.toast(msg, type)
+            });
+        } catch (e) { console.warn('[记忆面板] 挂载失败:', e); }
+    });
     </script>
+    <!-- 设置页「知识与记忆」合并面板（自建 tab / 两栏 / 搜索，旧 rag 标签隐藏并别名重定向） -->
+    <!-- 统一对话框（把原生 confirm 换成自家 UI） -->
+    <script src="/static/ui_dialog.js"></script>
+    <script src="/static/knowledge_memory.js"></script>
+    <!-- 栖语头像：12 枚内置 SVG（currentColor 跟随容器文字色） -->
+    <script src="/static/avatars.js"></script>
+    <script src="/static/memory_panel.js"></script>
+    <div class="legal-modal" id="channelLegalModal" role="dialog" aria-modal="true" aria-labelledby="channelLegalTitle">
+        <div class="legal-dialog">
+            <div class="legal-head">
+                <h3 id="channelLegalTitle">外部通讯用户协议、平台使用规则与免责声明</h3>
+                <p>版本 v2026-10-25 · 请完整阅读；必须滚动到底部才能确认。官方平台条款优先适用。</p>
+            </div>
+            <div class="legal-body" id="channelLegalBody">正在加载协议文本…</div>
+            <div class="legal-foot">
+                <label>
+                    <input type="checkbox" id="channelLegalAgree" disabled onchange="app.updateChannelLegalScroll()" style="margin-top:3px;">
+                    <span>我已阅读完整协议，理解账号封禁、数据、隐私、平台审核和内容合规风险，并同意自行承担使用责任。</span>
+                </label>
+                <div class="legal-actions">
+                    <span id="legalScrollHint">请滚动到底部</span>
+                    <button class="btn btn-secondary" onclick="app.closeChannelLegal()">暂不配置</button>
+                    <button class="btn btn-primary" id="channelLegalConfirm" disabled onclick="app.confirmChannelLegal()">同意并继续</button>
+                </div>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
-

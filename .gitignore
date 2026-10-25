@@ -5,42 +5,30 @@ __pycache__/
 .venv/
 venv/
 
-# 环境与密钥
+# 环境与密钥（永不提交）
 .env
-*.local
+.env.*
+!.env.example
+config/settings.yaml
 
-# 运行时数据
+# 运行时数据与日志
 data/
-
-# 下载的 MiniMind-O 官方权重（216MB+，用 tools/install_models.py --omni 重新拉取）
-models/realtime/minimind-3o/
-models/realtime/minimind-3o-moe/
 logs/
 *.log
+chat_history/
+chat_logs/
+outlines/
+uploads/
 
-# 构建产物
+# 构建产物 / 安装包
 build/
 dist/
+*.spec
+*.spec.bak
 
-# IDE
-.idea/
-.vscode/
-*.swp
-
-# 临时文件
-.DS_Store
-Thumbs.db
-
-# 构建工具 (UPX)
-tools/
-
-# node_modules
-node_modules/
-
-# 运行日志/回测产物
-wechatauto_logs/
-test_harness/report/
-test_harness/.tmpdata/
+# 备份 / 旧版本 / 测试产物
+backups/
+test_harness/
 _draft*.md
 _probe*.py
 _audit*.py
@@ -54,3 +42,35 @@ x99_*.txt
 bench_*.txt
 switch_row.txt
 orch_*.txt
+screenshots_diag/
+
+# 模型权重（体积大，按需下载）
+models/asr/**/*.onnx
+models/**/*.onnx
+models/**/*.pt
+models/**/*.pth
+models/**/*.safetensors
+models/**/*.gguf
+models/**/*.wav
+models/realtime/
+models/README.md
+
+# Node / Electron
+node_modules/
+launcher/node_modules/
+
+# 构建工具
+tools/upx/
+tools/7z/
+tools/ffmpeg/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 品牌源文件（只保留打包用 icon/logo）
+assets/_logo_src.png
+assets/exe_icon_check.png

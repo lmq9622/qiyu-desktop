@@ -39,6 +39,20 @@ PROMOTE_MENTIONS = 3
 PROMOTE_WEIGHT = 0.85
 
 
+# 纯骂人/玩笑话的特征（这些里面出现的"死/妈/去世"是脏话，不是丧亲）
+_INSULT_MARKERS = ("你妈", "你全家", "他妈", "妈的", "妈卖", "死妈", "妈死", "操你", "草你", "艹你",
+                   "傻逼", "煞笔", "沙比", "脑残", "狗叫", "你爹", "你爸死", "死你", "死一户口本",
+                   "滚你", "去死", "炸了")
+
+
+def _looks_like_insult(text: str) -> bool:
+    """看起来就是骂人/互怼的一句：这种话里出现的亲属、生死、病痛都是脏话，不能当事实记。"""
+    t = (text or "").strip()
+    if not t or len(t) > 48:
+        return False
+    return any(k in t for k in _INSULT_MARKERS)
+
+
 def _promote_score(meta: dict, now: float = None) -> float:
     """记忆综合晋升分（不单看 weight）：
     importance(权重)*0.40 + frequency(提及次数)*0.25 + stability(存在天数)*0.15
@@ -127,6 +141,37 @@ def _text_sim(a: str, b: str) -> float:
 
 
 # ============ 简单 TF-IDF 向量器 ============
+
+def _atomic_write_text(path, text: str) -> None:
+    """原子写文本：先写同目录临时文件，再 os.replace 顶替。
+
+    为什么必须有：直接 open(path,"w") 会先把文件截断成 0 字节再慢慢写，
+    这期间进程被 kill / 断电 / 崩一下，落盘的就成了半截文件——聊天历史、
+    记忆库都这么丢过内容。临时文件名带 pid，避免同目录撞名。
+    桌面版本机单进程，但崩溃/断电一样会读到半截文件，所以照服务器版统一原子写。
+    """
+    p = Path(path)
+    tmp = p.with_name(f"{p.name}.tmp{os.getpid()}")
+    tmp.write_text(text, encoding="utf-8")
+    # Windows 上目标文件正被别的进程/杀毒软件/编辑器短暂占住时，os.replace 会抛
+    # PermissionError。这里退避重试几次（0.05→0.10→0.15→0.20s），别把这次写入直接丢掉。
+    last_err = None
+    for attempt in range(5):
+        try:
+            os.replace(tmp, p)
+            return
+        except PermissionError as e:
+            last_err = e
+            if attempt == 4:
+                break
+            time.sleep(0.05 * (attempt + 1))
+    # 重试耗尽：清掉临时文件再把异常抛给调用方（各自的 except 会记日志），不静默吞掉。
+    try:
+        tmp.unlink(missing_ok=True)
+    except Exception:
+        pass
+    raise last_err
+
 
 class SimpleVectorizer:
     """轻量级文本向量化器，基于词频统计
@@ -287,8 +332,7 @@ class VectorStore:
                     for e in self.entries
                 ]
             }
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            _atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2))
             self._dirty = False
         except Exception as e:
             logger.error(f"[{self.name}] 保存失败: {e}")
@@ -413,6 +457,8 @@ class MemoryManager:
         self._pipeline_lock = threading.RLock()  # 记忆流水线专用锁，避免并发重复压缩
         self._lock = threading.RLock()
         self._classified_days: set = set()
+        self._sum_up_to: Dict[str, int] = {}   # 可选：本段话题结束时的整理边界（不设时按保留窗口兜底）
+        self._sum_done: Dict[str, int] = {}    # 已经整理到第几条（只整理新增内容，不重复跑，也不删原文）
         self._load_classified_days()
         self._migrate_legacy_layout()
         self._load_histories()
@@ -432,8 +478,8 @@ class MemoryManager:
 
     def _persist_classified_days(self):
         try:
-            self._classified_file().write_text(
-                json.dumps(sorted(self._classified_days), ensure_ascii=False), encoding="utf-8")
+            _atomic_write_text(self._classified_file(),
+                               json.dumps(sorted(self._classified_days), ensure_ascii=False))
         except Exception:
             pass
 
@@ -543,7 +589,11 @@ class MemoryManager:
                     short_n += 1
             short_n += self._merge_duplicate_short(store)
             store._save()
-        self.mark_classified_day(user_id, char_id, date_str)
+        # 只有**真的存进去东西**才算"这天分过级"：否则模型回了一堆能解析但都入不了库的
+        # 碎片（text<4 字）时，这天会被永久标记跳过、再也不重试。
+        # （LLM 异常 / 解析为空这两条路本来就提前 return，不会标记 —— 那是原有的正确行为。）
+        if long_n or short_n:
+            self.mark_classified_day(user_id, char_id, date_str)
         return {"day_messages": len(msgs), "long": long_n, "short": short_n}
 
     @staticmethod
@@ -669,13 +719,35 @@ class MemoryManager:
             logger.warning(f"[记忆] 老目录迁移失败: {e}")
 
     def _load_histories(self):
-        """启动时从每个用户自己的目录恢复对话历史（/data/users/<用户>/chat_history/**）"""
+        """启动时从每个用户自己的目录恢复对话历史（/data/users/<用户>/chat_history/**）
+
+        同时读回压缩水位 `_sum_done`（存在同目录 <hk>.sum.json）。水位只存内存时，
+        重启就丢了 → 历史不再裁剪后，每次重启都会把整段历史重新摘要/抽事实一遍。
+        """
         try:
             for up in get_users_dir().glob("*/chat_history/*.json"):
                 try:
+                    if up.name.endswith(".sum.json"):
+                        continue   # 这是压缩水位文件，不是历史，别当历史读
                     data = json.loads(up.read_text(encoding="utf-8"))
-                    if isinstance(data, list):
-                        self._chat_histories[up.stem] = data
+                    if not isinstance(data, list):
+                        continue   # 兼容旧格式：历史文件本来就是 list，非 list 一律跳过
+                    hk = up.stem
+                    self._chat_histories[hk] = data
+                    sp = up.with_suffix(".sum.json")
+                    if sp.exists():
+                        try:
+                            sd = json.loads(sp.read_text(encoding="utf-8"))
+                            self._sum_done[hk] = int((sd or {}).get("sum_done") or 0)
+                        except Exception:
+                            # 水位文件坏了：保守当成"已全部整理过"，别导致重压整段历史
+                            self._sum_done[hk] = len(data)
+                    else:
+                        # 旧数据（本改动之前的历史文件）没有水位文件。首次加载默认视为
+                        # 「这段历史已经全部整理过」= len(history)：否则升级后第一次启动
+                        # 会把几个月的历史整段重新摘要+抽事实，既慢又烧钱，还会把陈年旧事
+                        # 当新信息再记一遍。新写入的历史都会带水位文件，不受此默认影响。
+                        self._sum_done[hk] = len(data)
                 except Exception:
                     pass
         except Exception as e:
@@ -683,10 +755,48 @@ class MemoryManager:
 
     def _persist_history(self, hk: str):
         try:
-            self._history_file(hk).write_text(
-                json.dumps(self._chat_histories.get(hk, []), ensure_ascii=False), encoding="utf-8")
+            _atomic_write_text(self._history_file(hk),
+                               json.dumps(self._history_for_disk(hk), ensure_ascii=False))
+            # 顺带落盘压缩水位：全新用户写第一条消息就会生成水位文件（值 0），
+            # 重启后才不会被当成"没有水位的旧数据"而误判成"已全部整理过"。
+            self._persist_sum_done(hk)
         except Exception as e:
             logger.warning(f"[记忆] 对话历史持久化失败: {e}")
+
+    # 落盘历史里最多保留最近这么多条消息的图片原文，更早的只留占位符。
+    HISTORY_KEEP_IMG_MSGS = 20
+
+    def _history_for_disk(self, hk: str) -> list:
+        """落盘用的历史副本：把较早消息里的图片 base64 换成占位符。
+
+        图片 data URL 一条可达几万字符，而历史是"每条消息都整文件重写"，
+        留着会让 _persist_history 随历史线性变慢、文件无限膨胀。
+        内存里的原文不动：前端本次会话翻历史照旧有图；只有重启后从文件恢复时，
+        早期图片显示为 [图片]。最近 HISTORY_KEEP_IMG_MSGS 条仍保留原文
+        （刚发/刚看的图重启后还在）。
+        """
+        msgs = self._chat_histories.get(hk, [])
+        n = len(msgs)
+        out = []
+        for i, m in enumerate(msgs):
+            if "images" not in m or (n - i) <= self.HISTORY_KEEP_IMG_MSGS:
+                out.append(m)
+                continue
+            m2 = dict(m)
+            m2["images"] = ["[图片]" for _ in (m.get("images") or [])]
+            out.append(m2)
+        return out
+
+    def _sum_file(self, hk: str) -> Path:
+        """压缩水位文件：与历史文件同目录、同用户，按用户物理分开。"""
+        return user_dir(self._hk_user(hk), "chat_history") / f"{self._safe_name(hk)}.sum.json"
+
+    def _persist_sum_done(self, hk: str):
+        try:
+            _atomic_write_text(self._sum_file(hk),
+                               json.dumps({"sum_done": int(self._sum_done.get(hk) or 0)}))
+        except Exception as e:
+            logger.warning(f"[记忆] 压缩水位持久化失败: {e}")
 
     def _day_log_file(self, hk: str, date_str: str) -> Path:
         return user_dir(self._hk_user(hk), "chat_logs") / f"{self._safe_name(hk)}___{date_str}.json"
@@ -707,8 +817,8 @@ class MemoryManager:
     def _persist_day_log(self, hk: str, date_str: str):
         key = f"{hk}|{date_str}"
         try:
-            self._day_log_file(hk, date_str).write_text(
-                json.dumps(self._day_logs.get(key, []), ensure_ascii=False), encoding="utf-8")
+            _atomic_write_text(self._day_log_file(hk, date_str),
+                               json.dumps(self._day_logs.get(key, []), ensure_ascii=False))
         except Exception:
             pass
 
@@ -739,10 +849,20 @@ class MemoryManager:
             return
         hk = self._hkey(user_id, char_id)
         try:
-            self._outline_file(hk, date_str).write_text(
-                json.dumps({"date": date_str, "char_id": char_id, "outline": outline}, ensure_ascii=False),
-                encoding="utf-8")
+            _atomic_write_text(self._outline_file(hk, date_str),
+                               json.dumps({"date": date_str, "char_id": char_id, "outline": outline}, ensure_ascii=False))
             store = self._get_store(user_id, char_id)
+            # 同一天同一角色只保留最新一条大纲，避免自动总结器每次重跑都堆一条
+            try:
+                store.entries = [
+                    e for e in store.entries
+                    if not (e.memory_type == "summary"
+                            and (e.metadata or {}).get("type") == "daily_outline"
+                            and (e.metadata or {}).get("date") == date_str
+                            and (e.metadata or {}).get("character_id") == char_id)
+                ]
+            except Exception:
+                pass
             store.add(
                 text=f"[{date_str} 聊天大纲] {outline[:800]}",
                 metadata={"type": "daily_outline", "date": date_str, "character_id": char_id},
@@ -812,12 +932,53 @@ class MemoryManager:
                 else:
                     merged.append({"text": text, "weight": round(min(MEM_MAX_EVENT_WEIGHT, w), 2), "ts": now})
             merged.sort(key=lambda e: e.get("ts", 0))
-            self._events_file(hk, date_str).write_text(
-                json.dumps({"date": date_str, "char_id": char_id, "events": merged}, ensure_ascii=False, indent=2),
-                encoding="utf-8")
+            _atomic_write_text(self._events_file(hk, date_str),
+                               json.dumps({"date": date_str, "char_id": char_id, "events": merged}, ensure_ascii=False, indent=2))
             logger.info(f"[记忆] {user_id}/{char_id}/{date_str} 当天事件已保存 {len(merged)} 条（输入 {len(events)} 条）")
         except Exception as e:
             logger.warning(f"[记忆] 当天事件保存失败: {e}")
+
+    def save_full_day_summary(self, user_id: str, char_id: str = "", date_str: str = "") -> bool:
+        """更新"全天记忆总结"：把当天的分条事件合成一条（幂等，同一天只保留一条最新）。
+
+        和"每轮小结/每日大纲"分开：大纲记流水，全天总结记今天整体发生了什么、关系/情绪走向。
+        同一天重复调用只会覆盖那一条旧的全天总结，不会越堆越多。
+        """
+        try:
+            date_str = date_str or datetime.now().strftime("%Y-%m-%d")
+            events = self.get_daily_events(user_id, date_str, char_id) or []
+            outline = self.get_daily_outline(user_id, date_str, char_id) or ""
+            if not events and not outline:
+                return False
+            lines = []
+            for ev in events[:20]:
+                t = (ev.get("text") or "").strip()
+                if t:
+                    lines.append(f"- {t}")
+            body = "\n".join(lines) or f"- {outline[:200]}"
+            _nl = "\\n" if outline else ""
+            text = f"【{date_str} 全天总结】{outline[:200]}{_nl}{body}"
+            store = self._get_store(user_id, char_id)
+            # 同一天只留一条：先删掉旧的"全天总结"
+            try:
+                old = [e for e in store.entries
+                       if e.memory_type == "summary" and f"【{date_str} 全天总结】" in (e.text or "")]
+                if old:
+                    store.entries = [e for e in store.entries if e not in old]
+            except Exception:
+                pass
+            store.add(text=text[:1000], metadata={"type": "full_day_summary", "date": date_str},
+                      memory_type="summary")
+            try:
+                store.vectors = store.vectorizer.fit_transform([e.text for e in store.entries])
+            except Exception:
+                pass
+            store._save()
+            logger.info(f"[记忆] 全天总结已更新 {user_id}/{char_id}/{date_str}（{len(lines)} 条事件）")
+            return True
+        except Exception as e:
+            logger.warning(f"[记忆] 全天总结失败: {e}")
+            return False
 
     def get_user_char_pairs(self) -> List[tuple]:
         """返回全部出现过聊天的 (user_id, char_id) 对，供后台调度按角色独立触发（不依赖当前前台角色）"""
@@ -835,6 +996,8 @@ class MemoryManager:
         for pattern, sep in (("*/chat_logs/*.json", "___"), ("*/outlines/*.json", "___"),
                              ("*/chat_history/*.json", "__")):
             for p in get_users_dir().glob(pattern):
+                if p.name.endswith(".sum.json"):
+                    continue   # 压缩水位文件不是聊天记录，别从它反推 (用户,角色) 对
                 stem = p.stem
                 hk = stem.rsplit(sep, 1)[0] if sep else stem
                 add_from(hk)
@@ -902,22 +1065,60 @@ class MemoryManager:
         )
 
     def pending_compress(self, user_id: str, char_id: str = "") -> List[dict]:
-        """返回待压缩的旧对话（超出保留窗口的部分）"""
-        with self._lock:
-            history = self._chat_histories.get(self._hkey(user_id, char_id), [])
-            keep = self._summary_interval * 2  # 保留最近 N 条不压缩
-            if len(history) <= keep:
-                return []
-            return history[:-keep]
+        """返回"还没整理过、又已超出保留窗口"的旧对话。
 
-    def trim_history(self, user_id: str, count: int, char_id: str = ""):
-        """从对话历史头部移除已压缩的消息"""
+        与老实现的关键区别：**不再靠裁剪历史来推进**，而是用 `_sum_done` 水位记录
+        "已经整理到第几条"。整理过的不再重复喂给模型，但原文一律留在历史里。
+        （原实现 trim 掉原文后，用户翻聊天记录会发现以前的对话整段消失。）
+        """
         with self._lock:
             hk = self._hkey(user_id, char_id)
             history = self._chat_histories.get(hk, [])
+            start = int(self._sum_done.get(hk) or 0)      # 上次整理到哪
+            end = self._sum_up_to.get(hk)                 # 若上层显式标了话题边界就用它
+            if end is None:
+                keep = self._summary_interval * 2         # 保留最近 N 条不整理
+                end = len(history) - keep
+            end = int(min(max(0, end), len(history)))
+            if end <= start:
+                return []
+            return history[start:end]
+
+    HARD_KEEP = 3000      # 只在这个条数以上才允许硬裁剪（防无限增长）
+    # 基准（本机，3000 条历史、每 20 条一张 3 万字符的 base64 图）：剥掉早期图片原文后
+    # 单次 _persist_history ≈ 6.7ms、文件 ~590KB；不剥图则 ≈ 29ms、文件 ~5MB。
+    # 仍 <50ms，故 HARD_KEEP 保持 3000（若将来内容变大导致超 50ms，降到 1500）。
+
+    def trim_history(self, user_id: str, count: int, char_id: str = "", force: bool = False):
+        """从对话历史头部移除消息（**除极端长以外不再使用**，历史默认只追加不裁剪）。
+
+        force=False 时只允许把历史裁到 HARD_KEEP 条；其余情况拒绝，避免哪天又被
+        某个调用方"顺手裁一下"把用户的历史记录删掉（会打日志指出调用来源）。
+        """
+        import traceback as _tb
+        with self._lock:
+            hk = self._hkey(user_id, char_id)
+            history = self._chat_histories.get(hk, [])
+            if not force and len(history) - int(count) < self.HARD_KEEP:
+                caller = "?"
+                try:
+                    for fr in _tb.extract_stack()[:-1][::-1]:
+                        if not (fr.filename.endswith("memory\\__init__.py") or fr.name == "trim_history"):
+                            caller = f"{fr.filename.split(chr(92))[-1]}:{fr.lineno}:{fr.name}"
+                            break
+                except Exception:
+                    pass
+                logger.warning(f"[记忆] 拒绝裁剪历史 {hk}（要删 {count} 条，剩 {len(history)-int(count)} 条 < {self.HARD_KEEP}）"
+                               f" 调用方={caller}")
+                return
             if history:
                 self._chat_histories[hk] = history[count:]
-                self._persist_history(hk)
+                if self._sum_up_to.get(hk) is not None:
+                    self._sum_up_to[hk] = max(0, int(self._sum_up_to[hk]) - int(count))
+                # 水位跟着往前挪：硬裁掉的条数如果不减，"已整理到第几条"就指向了错位的位置，
+                # 裁后中间那一段会永远被当成已整理、再也不会进摘要/事实提取。
+                self._sum_done[hk] = max(0, int(self._sum_done.get(hk) or 0) - int(count))
+                self._persist_history(hk)   # 内部会一并持久化水位
 
     async def compress_history(self, user_id: str, llm_async_fn=None, char_id: str = ""):
         """记忆流水线：把旧对话压缩成摘要 + 摘取用户事实，再裁剪对话历史。
@@ -960,8 +1161,9 @@ class MemoryManager:
                         memory_type="summary",
                     )
 
-                # 2) 摘取用户事实（只取用户消息，供人物档案使用）
-                user_msgs = [m["content"] for m in old if m["role"] == "user"]
+                # 2) 摘取用户事实（只取用户消息；骂人/互怼的那种整句跳过，供人物档案使用）
+                user_msgs = [m["content"] for m in old
+                             if m["role"] == "user" and not _looks_like_insult(m.get("content") or "")]
                 new_facts: list[str] = []
                 if user_msgs and llm_async_fn:
                     try:
@@ -973,16 +1175,39 @@ class MemoryManager:
                             "\n".join(u[:400] for u in user_msgs)
                         )
                         facts = (await llm_async_fn(fact_prompt)).strip()
+                        # 亲属身故这类敏感事实，模型可能从骂人话（"你妈死了"）里误提取，
+                        # 代码层再兜一道：原文里没有"不像骂人"的相关发言就丢弃。
+                        _grief_words = ("去世", "丧亲", "过世", "离世", "病逝", "走了", "没了", "死")
                         for line in facts.splitlines():
                             line = line.strip().lstrip("-•·0123456789.、")
-                            if line and line != "无":
-                                self.add_user_fact(user_id, line)
-                                new_facts.append(line)
+                            if not line or line == "无":
+                                continue
+                            if any(w in line for w in _grief_words) and (line.find("母") >= 0 or line.find("父") >= 0
+                                                                        or line.find("家") >= 0 or line.find("亲") >= 0):
+                                if not any(not _looks_like_insult(u) and any(w in u for w in _grief_words)
+                                           for u in user_msgs):
+                                    logger.warning(f"[记忆流水线] 疑似从骂人话里提取的亲属事实，已丢弃: {line[:40]}")
+                                    continue
+                            self.add_user_fact(user_id, line)
+                            new_facts.append(line)
                     except Exception as e:
                         logger.warning(f"[记忆流水线] 用户事实提取失败: {e}")
 
-                # 3) 裁剪历史
-                self.trim_history(user_id, len(old), char_id)
+                # 3) 只推进"已整理到哪"的水位，**不删除原文**——删了用户翻历史就发现聊天记录消失。
+                #    原文一直留在主历史里；给模型的上下文由调用方按 get_recent_history(limit=…) 取最近窗口，
+                #    不会因为这里不裁剪就把全部历史塞给模型。
+                #    空间够（本机磁盘），只在极端长（>HARD_KEEP 条）时才做一次硬裁剪兜底。
+                try:
+                    with self._lock:
+                        hk = self._hkey(user_id, char_id)
+                        self._sum_done[hk] = int(self._sum_done.get(hk) or 0) + len(old)
+                        self._sum_up_to.pop(hk, None)
+                        self._persist_sum_done(hk)   # 水位不能只留内存，否则重启后这段会被重压
+                        hist_len = len(self._chat_histories.get(hk) or [])
+                        if hist_len > self.HARD_KEEP:
+                            self.trim_history(user_id, hist_len - self.HARD_KEEP, char_id)
+                except Exception:
+                    pass
                 logger.info(f"[记忆流水线] 用户 {user_id} 已压缩 {len(old)} 条旧对话入记忆库")
                 return {
                     "summary": summary,
@@ -1111,8 +1336,13 @@ class MemoryManager:
         with self._lock:
             hk = self._hkey(user_id, char_id)
             self._chat_histories[hk] = []
+            # 水位一并归零：不清的话清空历史后，新消息要重新涨到旧水位才会被摘要，
+            # 中间很长一段新对话都进不了记忆。
+            self._sum_done[hk] = 0
+            self._sum_up_to.pop(hk, None)
             try:
                 self._history_file(hk).unlink(missing_ok=True)
+                self._sum_file(hk).unlink(missing_ok=True)
             except Exception:
                 pass
 
@@ -1200,14 +1430,20 @@ class MemoryManager:
 
     # ============ 双记忆层：长/短记忆 + 遗忘 + 高频转长 ============
 
-    def save_dual_memory(self, user_id: str, long_items: list = None, short_items: list = None, char_id: str = ""):
+    def save_dual_memory(self, user_id: str, long_items: list = None, short_items: list = None,
+                         char_id: str = "", self_items: list = None):
         """模型每轮 JSON 带出的记忆条目入库：
         long → 长期写死（去重）；short → 短期带权重，同类条目被反复提及会刷新 TTL 并累计次数，够格自动转长期。
+        self → 模型 `memory_write.self` 里"她**自己**说过、要保持一致"的事，用 record_type=self
+               单独标记（不能混进 fact，否则会被当成"关于用户的事实"注入 → 角色自相矛盾）。
         short_items 元素支持 str 或 {"text": str, "weight": float}
         """
         store = self._get_store(user_id, char_id)
         now0 = time.time()
-        for text in (long_items or []):
+        # long 是"关于用户的事实"，self 是"角色自己说过的事"，都进长期库但用 type/record_type 区分
+        _pairs = ([(t, "long_fact") for t in (long_items or [])]
+                  + [(t, "self_fact") for t in (self_items or [])])
+        for text, _kind in _pairs:
             text = (text or "").strip()
             if len(text) < 4:
                 continue
@@ -1227,7 +1463,8 @@ class MemoryManager:
                 continue
             store.add(
                 text=text[:300],
-                metadata={"type": "long_fact", "source": "model", "weight": 0.9, "mention_count": 1,
+                metadata={"type": _kind, "source": "model", "weight": 0.9, "mention_count": 1,
+                          **({"record_type": "self"} if _kind == "self_fact" else {}),
                           "explicit": 1, "first_seen": now0, "last_seen": now0},
                 memory_type="long_term",
             )
@@ -1317,8 +1554,10 @@ class MemoryManager:
         if char_id:
             stores = [self._get_store(user_id, char_id)]
         else:
-            prefix = f"user_{user_id}"
-            stores = [s for k, s in self._stores.items() if k == user_id or k.startswith(prefix + "__")]
+            # _stores 的键是 f"{user_id}__{char_id}"（"user_" 前缀只在 VectorStore.name 上），
+            # 原来按 "user_{uid}__" 匹配恒假 → 短记忆衰减/过期/晋升/去重从未执行
+            stores = [s for k, s in self._stores.items()
+                      if k == user_id or str(k).startswith(f"{user_id}__")]
         changed = False
         for store in stores:
             if self._clean_store(store):
@@ -1444,7 +1683,7 @@ class KnowledgeBase:
         
         return chunks
     
-    def index_document(self, filepath: Path) -> int:
+    def index_document(self, filepath: Path, char_id: str = "") -> int:
         """索引单个文档"""
         content = self._read_file(filepath)
         if not content:
@@ -1470,6 +1709,8 @@ class KnowledgeBase:
                     "source": str(filepath),
                     "chunk_index": i,
                     "total_chunks": len(chunks),
+                    # 归属角色：空 = 全局知识（所有角色都能检索到）；非空 = 该角色专属（别的角色检索不到）
+                    "char_id": str(char_id or ""),
                 },
                 memory_type="knowledge",
             )
@@ -1489,13 +1730,52 @@ class KnowledgeBase:
         
         return total
     
-    def search(self, query: str, top_k: int = 3) -> List[dict]:
-        """搜索知识库"""
-        return self.store.search(query, top_k=top_k, memory_type="knowledge")
-    
-    def get_knowledge_context(self, query: str, top_k: int = 3) -> str:
-        """获取知识上下文"""
-        results = self.search(query, top_k=top_k)
+    def search(self, query: str, top_k: int = 3, char_id: str = None) -> List[dict]:
+        """搜索知识库。
+
+        给了 char_id 就只返回「该角色专属」+「全局」的知识：A 角色的简历/自述
+        不会被检索进 B 角色的提示词（RAG 也按角色隔离）。
+        """
+        res = self.store.search(query, top_k=max(top_k * 4, top_k), memory_type="knowledge")
+        if not char_id:
+            return res[:top_k]
+        out = []
+        for r in res:
+            meta = {}
+            try:
+                meta = r.get("metadata") or {}
+            except Exception:
+                meta = {}
+            owner = str(meta.get("char_id") or "")
+            if not owner:
+                # 兼容旧索引：早年入库的条目没打 char_id，从来源文件名里认角色
+                # （resume_char_xxxx.md / char_xxxx_自述.md），否则它们会一直当全局知识串味
+                src = str(meta.get("source") or "")
+                i = src.find("char_")
+                if i >= 0:
+                    j = i + 5
+                    while j < len(src) and (src[j].isalnum() or src[j] == "_"):
+                        j += 1
+                    owner = src[i:j]
+                else:
+                    # 兼容 self_said_<charid>.md / resume_<charid>.md 这类命名，
+                    # 这类文件名不含 char_ 前缀，反推不出归属会被当成全局知识。
+                    import os as _os
+                    base = _os.path.basename(src)
+                    for _pre in ("self_said_", "resume_"):
+                        if base.startswith(_pre):
+                            owner = base[len(_pre):].rsplit(".", 1)[0]
+                            break
+            if owner and owner != char_id:
+                continue
+            out.append(r)
+            if len(out) >= top_k:
+                break
+        return out
+
+    def get_knowledge_context(self, query: str, top_k: int = 3, char_id: str = None) -> str:
+        """获取知识上下文（char_id 非空时按角色隔离检索）"""
+        results = self.search(query, top_k=top_k, char_id=char_id)
         if not results:
             return ""
         

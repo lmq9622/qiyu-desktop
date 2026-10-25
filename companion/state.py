@@ -10,13 +10,40 @@ def get_resource_path(relative_path: str = "") -> Path:
     if hasattr(sys, '_MEIPASS'):
         base = Path(sys._MEIPASS)
     else:
-        base = Path(__file__).parent
+        # 项目根目录。原来写的是 Path(__file__).parent（= companion/），开发模式下
+        # 数据目录变成 companion/data，和 pathutil（记忆/历史用的 项目根/data）分成两处，
+        # 设置、日志、qiyu.db、TTS 缓存都写错地方；STATIC_DIR 也指到不存在的 companion/gateway。
+        base = Path(__file__).resolve().parent.parent
     if relative_path:
         return base / relative_path
     return base
 
+_LEGACY_MIGRATED = False
+
+
+def _migrate_legacy_companion_data(d: Path) -> None:
+    """一次性把旧版开发模式误写到 companion/data 的顶层文件搬到正确的数据目录。
+    只复制目标里还不存在的文件，不覆盖、不删除源文件。"""
+    global _LEGACY_MIGRATED
+    if _LEGACY_MIGRATED:
+        return
+    _LEGACY_MIGRATED = True
+    legacy = Path(__file__).resolve().parent / "data"
+    try:
+        if not legacy.is_dir() or legacy.resolve() == d.resolve():
+            return
+        import shutil
+        for f in legacy.iterdir():
+            if f.is_file() and not (d / f.name).exists():
+                shutil.copy2(f, d / f.name)
+                logger.info(f"[数据目录] 迁移旧位置文件 {f} → {d / f.name}")
+    except Exception as e:
+        logger.warning(f"[数据目录] 迁移 companion/data 失败（不影响启动）: {e}")
+
+
 def get_data_dir() -> Path:
-    """可写数据目录（exe 环境用用户目录，避免写入临时解压目录）"""
+    """可写数据目录（exe 环境用用户目录，避免写入临时解压目录）。
+    与 pathutil.get_data_dir 同一口径：QIYU_DATA_DIR > 打包 ~/.ai_companion/data > 项目根/data"""
     env_data = os.getenv("QIYU_DATA_DIR", "")
     if env_data:
         d = Path(env_data)
@@ -25,6 +52,8 @@ def get_data_dir() -> Path:
     else:
         d = PROJECT_DIR / "data"
     d.mkdir(parents=True, exist_ok=True)
+    if not env_data and not hasattr(sys, "_MEIPASS"):
+        _migrate_legacy_companion_data(d)
     return d
 
 
@@ -56,7 +85,7 @@ STATIC_DIR = PROJECT_DIR / "gateway" / "static"
 
 DEMO_PORT = int(os.getenv("QIYU_PORT", "8765"))
 
-DEMO_HOST = os.getenv("QIYU_HOST", "0.0.0.0")
+DEMO_HOST = os.getenv("QIYU_HOST", "127.0.0.1")
 
 LLM_URL = os.getenv("LLM_BASE_URL", "http://192.168.2.6:8081/v1")
 

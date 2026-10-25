@@ -1,5 +1,0 @@
-===== runA_final =====
-总:1080 通过:1079 失败:1
-分类: smalltalk=60, cold_short=60, comfort=60, tool=60, topic_shift=60, night=60, romance=60, fight=60, happy=60, inject=60, longform=60, story_listener=60, old_recall=60, multi_turn=60, recall_recent=60, rejection=60, proactive_cooldown=60, memory=60
-人设: p_m_warm=90/90, p_m_tsun=90/90, p_m_yuanqi=90/90, p_m_bro=90/90, p_m_laoge=90/90, p_m_game=90/90, p_f_warm=90/90, p_f_cold=90/90, p_f_sun=90/90, p_f_guimi=90/90, p_f_dushe=89/90, p_f_tree=90/90
-高频问题: 

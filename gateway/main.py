@@ -30,9 +30,12 @@ from config import get_config
 from rag.tags import get_tag_manager, MemoryTagManager
 
 # ============ 配置 ============
-GATEWAY_HOST = os.getenv("GATEWAY_HOST", "0.0.0.0")
+# 默认只听本机：网关承载 OpenAI 兼容接口，默认口令等同于没有口令。
+# 要在局域网用，请显式设 GATEWAY_HOST=0.0.0.0 并配置一个真实 GATEWAY_API_KEY。
+GATEWAY_HOST = os.getenv("GATEWAY_HOST", "127.0.0.1")
 GATEWAY_PORT = int(os.getenv("GATEWAY_PORT", "8000"))
-GATEWAY_API_KEY = os.getenv("GATEWAY_API_KEY", "ai-companion-key-change-me")
+_DEFAULT_GATEWAY_KEY = "ai-companion-key-change-me"
+GATEWAY_API_KEY = os.getenv("GATEWAY_API_KEY", _DEFAULT_GATEWAY_KEY)
 
 LETTA_BASE_URL = os.getenv("LETTA_BASE_URL", "http://127.0.0.1:8283")
 LETTA_ADMIN_TOKEN = os.getenv("LETTA_ADMIN_TOKEN", "")
@@ -210,7 +213,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[f"http://127.0.0.1:{GATEWAY_PORT}", f"http://localhost:{GATEWAY_PORT}"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -226,12 +229,27 @@ router = get_router()
 
 
 def verify_api_key(authorization: Optional[str] = None) -> bool:
-    if not GATEWAY_API_KEY or GATEWAY_API_KEY == "ai-companion-key-change-me":
+    if not GATEWAY_API_KEY or GATEWAY_API_KEY == _DEFAULT_GATEWAY_KEY:
         return True
     if not authorization:
         return False
     key = authorization.replace("Bearer ", "").strip()
     return key == GATEWAY_API_KEY
+
+
+@app.middleware("http")
+async def guard_unconfigured_gateway(request, call_next):
+    """未配置真实 Key 时，只允许本机访问。
+
+    默认口令是公开的占位符，等于没有鉴权；此时即使有人把 GATEWAY_HOST 设成
+    0.0.0.0，也不该让同网段直接调用。配了真实 Key 的走各端点的 verify_api_key。
+    """
+    if not GATEWAY_API_KEY or GATEWAY_API_KEY == _DEFAULT_GATEWAY_KEY:
+        host = (request.client.host if request.client else "") or ""
+        if host not in ("127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"):
+            return JSONResponse(status_code=403,
+                                content={"detail": "网关未配置 API Key，只允许本机访问"})
+    return await call_next(request)
 
 
 @app.on_event("startup")

@@ -1,0 +1,436 @@
+/* =============================================================================
+ * 栖语 · 「知识与记忆」面板样式（配合 knowledge_memory.js 使用）
+ * -----------------------------------------------------------------------------
+ * 约定：
+ *   1) 颜色 / 圆角 / 阴影 / 过渡全部取 index.html :root 里的变量，
+ *      这样浅色、深色（:root[data-theme="dark"]）两套主题都不用另写；
+ *   2) 类名前缀统一 km-，不会和 index.html 里既有的类撞名；
+ *   3) 只有"知识库/记忆"的区分配色用了两个固定色（蓝 / 绿），
+ *      绿色沿用 index.html 里已有的 #10b981 通道色，视觉上不突兀。
+ * ========================================================================== */
+
+/* ---------- 宿主容器：设置页默认 720px 宽，两栏放不下，切到本标签时加宽 ---------- */
+.settings-layout.km-host-wide { max-width: 1120px; }
+/* 兜底：即使宿主没打上类，只要是本面板就把宽度放开（Edge 105+ 支持 :has） */
+.settings-layout:has(.km-wrap) { max-width: 1120px; }
+
+/* ---------- 面板根 ---------- */
+.km-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+}
+
+/* ---------- 顶部一行说明 ---------- */
+.km-lede {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px;
+    padding: 10px 14px;
+    border-radius: var(--radius-lg);
+    background: var(--bg-hover);
+    border: 1px solid var(--border);
+    font-size: 0.82rem;
+    line-height: 1.6;
+    color: var(--text-secondary);
+}
+.km-lede strong { color: var(--text-primary); font-weight: 700; }
+.km-lede-tail { color: var(--text-tertiary); margin-left: 6px; }
+
+/* ---------- 搜索条 ---------- */
+.km-search {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+.km-input {
+    flex: 1 1 240px;
+    min-width: 180px;
+}
+.km-search-state {
+    font-size: 0.75rem;
+    color: var(--text-tertiary);
+    margin-left: auto;
+    white-space: nowrap;
+}
+
+/* ---------- 搜索结果（两栏并列） ---------- */
+.km-hits {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 14px;
+    padding: 14px;
+    border-radius: var(--radius-lg);
+    background: var(--bg-hover);
+    border: 1px solid var(--border);
+}
+.km-hits[hidden] { display: none !important; }
+
+.km-hit-col { min-width: 0; }
+
+.km-hit-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 8px;
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: var(--text-secondary);
+}
+
+/* 「来自知识库 / 来自记忆」来源标注 */
+.km-src-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 9px;
+    border-radius: 999px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    white-space: nowrap;
+}
+.km-src-kb { background: rgba(10, 132, 255, 0.12); color: #0a84ff; }
+.km-src-mem { background: rgba(16, 185, 129, 0.14); color: #10b981; }
+
+.km-count {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
+/* ---------- 两栏主体 ---------- */
+.km-columns {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 16px;
+    /* 两栏等高：左边内容少的时候不至于变成一条短卡片 */
+    align-items: stretch;
+}
+
+.km-panel {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 260px;
+    padding: 16px 16px 14px;
+    border-radius: var(--radius-lg);
+    background: var(--liquid-bg);
+    border: var(--liquid-border);
+    box-shadow: var(--liquid-highlight), var(--shadow-sm);
+    backdrop-filter: blur(40px) saturate(1.4);
+}
+/* 左右两种面板用一条细的顶边色区分（不抢既有视觉） */
+.km-panel-kb { border-top: 2px solid rgba(10, 132, 255, 0.45); }
+.km-panel-mem { border-top: 2px solid rgba(16, 185, 129, 0.45); }
+
+.km-panel-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+    padding-bottom: 10px;
+    margin-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+}
+.km-panel-titlewrap {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    min-width: 0;
+}
+.km-panel-title {
+    margin: 0;
+    font-size: 0.98rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+.km-badge {
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: 0.66rem;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    background: var(--bg-active);
+    border: 1px solid var(--border);
+    white-space: nowrap;
+}
+.km-scope {
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: 0.66rem;
+    color: var(--text-tertiary);
+    background: var(--bg-hover);
+    border: 1px solid var(--border);
+}
+.km-panel-tools {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+/* ---------- 上传 / 添加提示 ---------- */
+.km-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 9px 12px;
+    margin-bottom: 10px;
+    border-radius: var(--radius-md);
+    background: var(--bg-hover);
+    border: 1px solid var(--border);
+    font-size: 0.76rem;
+    line-height: 1.55;
+    color: var(--text-secondary);
+}
+.km-note-ico { color: var(--text-tertiary); flex-shrink: 0; }
+.km-note code,
+.km-hint code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    padding: 1px 5px;
+    border-radius: 5px;
+    background: var(--bg-active);
+    color: var(--text-primary);
+}
+
+.km-addrow { margin-bottom: 10px; }
+.km-addbody {
+    margin-top: 8px;
+    padding: 10px;
+    border-radius: var(--radius-md);
+    background: var(--bg-hover);
+    border: 1px solid var(--border);
+}
+.km-addbody[hidden] { display: none !important; }
+.km-addbody-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+.km-addbody-row .form-input { flex: 1 1 200px; min-width: 160px; }
+.km-hint {
+    margin: 8px 0 0;
+    font-size: 0.72rem;
+    line-height: 1.6;
+    color: var(--text-tertiary);
+}
+
+/* ---------- 列表与卡片 ---------- */
+.km-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex: 1 1 auto;
+    max-height: 46vh;
+    overflow-y: auto;
+    padding-right: 3px;
+}
+
+.km-card {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: var(--radius-md);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    transition: var(--transition);
+}
+.km-card:hover { border-color: var(--border-focus); }
+.km-card-main { flex: 1 1 auto; min-width: 0; }
+
+.km-card-title {
+    font-size: 0.86rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    word-break: break-word;
+}
+.km-card-text {
+    font-size: 0.82rem;
+    line-height: 1.55;
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+/* 搜索命中的片段可能很长，压到 6 行，全量内容在 title 里 */
+.km-card-hit .km-card-text,
+.km-card-hit .km-card-meta { overflow: hidden; }
+.km-card-hit .km-card-text {
+    display: -webkit-box;
+    -webkit-line-clamp: 6;
+    -webkit-box-orient: vertical;
+}
+
+.km-card-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: 5px;
+    font-size: 0.71rem;
+    color: var(--text-muted);
+}
+.km-card-acts { flex-shrink: 0; display: flex; align-items: center; }
+
+.km-x {
+    border: none;
+    background: none;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 1.05rem;
+    line-height: 1;
+    padding: 2px 4px;
+    border-radius: 6px;
+    transition: var(--transition);
+}
+.km-x:hover { color: var(--danger); background: var(--bg-hover); }
+
+/* 分层标签 */
+.km-tier {
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 0.68rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: var(--bg-active);
+}
+.km-tier-whigh { color: #ff3b30; background: rgba(255, 59, 48, 0.12); }
+.km-tier-wmid { color: #ff9f0a; background: rgba(255, 159, 10, 0.14); }
+.km-tier-wlow { color: #8e8e93; background: rgba(142, 142, 147, 0.14); }
+
+.km-tag {
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 0.68rem;
+    color: var(--text-secondary);
+    background: var(--bg-active);
+}
+
+/* 分组标题（当天 / 短期 / 长期） */
+.km-group-title {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 8px 2px 0;
+}
+.km-group-title:first-child { margin-top: 0; }
+.km-group-name {
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    color: var(--text-secondary);
+}
+.km-group-sub { font-size: 0.68rem; color: var(--text-muted); }
+
+/* 当天占位提示 */
+.km-hold {
+    padding: 9px 12px;
+    border-radius: var(--radius-md);
+    background: var(--bg-hover);
+    border: 1px dashed var(--border);
+    font-size: 0.75rem;
+    color: var(--text-tertiary);
+    line-height: 1.55;
+}
+
+/* ---------- 空态（两边文案不同，这是产品要求） ---------- */
+.km-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 28px 16px;
+    text-align: center;
+    border-radius: var(--radius-md);
+    border: 1px dashed var(--border);
+    background: var(--bg-hover);
+}
+.km-empty-ico { font-size: 1.4rem; opacity: 0.75; }
+.km-empty-title {
+    font-size: 0.88rem;
+    font-weight: 700;
+    color: var(--text-secondary);
+}
+.km-empty-sub {
+    font-size: 0.76rem;
+    line-height: 1.6;
+    color: var(--text-muted);
+    max-width: 280px;
+}
+.km-empty-note {
+    margin-top: 4px;
+    font-size: 0.72rem;
+    color: var(--text-tertiary);
+    font-style: italic;
+}
+.km-empty-err { border-style: solid; border-color: rgba(220, 38, 38, 0.28); }
+.km-empty-err .km-empty-title { color: var(--danger); }
+
+/* 搜索单栏空态 */
+.km-empty-sm {
+    padding: 14px 12px;
+    border-radius: var(--radius-md);
+    border: 1px dashed var(--border);
+    font-size: 0.76rem;
+    line-height: 1.5;
+    color: var(--text-muted);
+    text-align: center;
+}
+
+/* ---------- 手动加一条记忆 ---------- */
+.km-memadd {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+}
+.km-memtext {
+    min-height: 56px;
+    resize: vertical;
+    font-size: 0.8rem;
+}
+.km-memadd .btn { align-self: flex-end; }
+
+/* ---------- 脚注 ---------- */
+.km-foot {
+    margin: 0;
+    font-size: 0.72rem;
+    line-height: 1.65;
+    color: var(--text-muted);
+}
+
+/* ---------- 深色主题下主按钮字色兜底 ----------
+ * index.html 里 `.btn-primary { background: var(--primary); color: #fff; }`，
+ * 而深色主题把 --primary 换成了 #f0f0f0 —— 白字压白底，全站主按钮都看不清。
+ * 这是宿主既有问题，不在本次改动范围内，所以只在本面板里做局部兜底，不动全局。 */
+:root[data-theme="dark"] .km-wrap .btn-primary,
+body[data-theme="dark"] .km-wrap .btn-primary { color: #0a0a0c; }
+
+/* ---------- 窄屏：两栏变一栏 ---------- */@media (max-width: 1080px) {
+    .km-columns,
+    .km-hits { grid-template-columns: minmax(0, 1fr); }
+    .km-list { max-height: none; }
+}
+@media (max-width: 640px) {
+    .km-search-state { width: 100%; margin-left: 0; text-align: right; }
+    .km-panel { padding: 14px 12px; }
+}
+
+/* 文档切片（点开文档后展开） */
+.km-doc-open { margin-left: auto; color: var(--text-tertiary); font-size: .72rem; }
+.km-doc-chunks { padding: 8px 12px 12px; border-top: 1px dashed var(--border); display: flex; flex-direction: column; gap: 8px; }
+.km-doc-chunks-head { font-size: .72rem; color: var(--text-tertiary); }
+.km-doc-chunk { background: var(--bg-hover); border-radius: var(--radius-md); padding: 8px 10px; }
+.km-doc-chunk-idx { font-size: .68rem; color: var(--accent, #38BDF8); font-weight: 700; margin-bottom: 3px; }
+.km-doc-chunk-text { font-size: .8rem; line-height: 1.6; color: var(--text-secondary); white-space: pre-wrap; word-break: break-word; }
+.km-doc-loading { font-size: .78rem; color: var(--text-tertiary); padding: 6px 0; }

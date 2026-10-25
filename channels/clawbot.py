@@ -318,6 +318,21 @@ class ClawBotChannel(BaseChannel):
         if baseurl:
             self._client.baseurl = baseurl.rstrip("/")
         self._cursor = st.get("cursor") or ""
+        # 恢复合并对话联系人 + context_token：重启后主动消息（找话/早上补回）才能直接发到微信
+        _mr = st.get("merged_remote") or {}
+        if isinstance(_mr, dict) and _mr:
+            try:
+                self._merged_remote.update({str(k): str(v) for k, v in _mr.items()})
+                logger.info(f"[{self.id}] 恢复合并对话联系人 {len(_mr)} 条（主动消息可回发）")
+            except Exception:
+                pass
+        _ss = st.get("sessions") or {}
+        if isinstance(_ss, dict) and _ss:
+            try:
+                self._sessions.update({str(k): str(v) for k, v in _ss.items() if v})
+                logger.info(f"[{self.id}] 恢复 context_token {len(self._sessions)} 条（重启后主动消息可直接下发）")
+            except Exception:
+                pass
         saved_cfg = store.load_config(self.id)
         if saved_cfg:
             for k, v in saved_cfg.items():
@@ -351,6 +366,11 @@ class ClawBotChannel(BaseChannel):
             "bot_token": self._client.bot_token,
             "baseurl": self._client.baseurl,
             "cursor": self._cursor,
+            # 最近发过消息的微信联系人（合并对话 → 主动消息回发用），重启后也保留
+            "merged_remote": dict(self._merged_remote or {}),
+            # context_token 也落盘：不发主动消息时它是唯一凭证，
+            # 原来只存内存 → 一重启「主动消息/早上补回」就全发不出去
+            "sessions": dict(self._sessions or {}),
             "updated_at": time.time(),
         })
 
@@ -373,27 +393,41 @@ class ClawBotChannel(BaseChannel):
         if self.running:
             return True
         if not force and self._client.bot_token:
-            try:
-                # 探测用短超时（最长 6s），避免"点击启动像卡死"：token 失效会很快转二维码流程
-                data = self._client.get_updates(self._cursor, timeout=5, probe=True)
-                ret = data.get("ret")
-                errcode = data.get("errcode")
-                if ret in SEND_RET_OK and errcode in SEND_RET_OK:
-                    buf = data.get("get_updates_buf") or ""
-                    if buf:
-                        self._cursor = buf
-                        self._save_state()
-                    for msg in data.get("msgs") or []:
-                        self._handle_inbound(msg)
+            # 探测重试 3 次：刚启动 / 网络抖动时，单次 5s 超时很容易被误判成"登录态失效"，
+            # 结果每次重启都退回二维码（用户要重新扫码）。超时/网络错误重试，只有明确返回失效才转扫码。
+            for _try in range(3):
+                try:
+                    data = self._client.get_updates(self._cursor, timeout=5 + 4 * _try, probe=True)
+                    ret = data.get("ret")
+                    errcode = data.get("errcode")
+                    if ret in SEND_RET_OK and errcode in SEND_RET_OK:
+                        buf = data.get("get_updates_buf") or ""
+                        if buf:
+                            self._cursor = buf
+                            self._save_state()
+                        for msg in data.get("msgs") or []:
+                            self._handle_inbound(msg)
+                        self.running = True
+                        self.qr_status = "running"
+                        self.qr_message = "已恢复上次登录，正在监听消息"
+                        self._start_updates_loop()
+                        logger.success(f"[ClawBot:{self.id}] 复用上次登录态，直接开始监听")
+                        return True
+                    logger.info(f"[ClawBot:{self.id}] 上次登录态已失效（ret={ret} errcode={errcode}），需重新扫码")
+                    break
+                except Exception as e:
+                    if _try < 2:
+                        logger.warning(f"[ClawBot:{self.id}] 登录态探测超时/失败，2 秒后重试（第 {_try + 2}/3 次）: {e}")
+                        time.sleep(2)
+                        continue
+                    # 网络类失败（读超时/连不上）≠ token 失效：iLink 的 getupdates 本身就是长轮询，
+                    # 超时很可能只是网络抖动。这里直接进监听，真失效会在轮询里报错、那时再走二维码。
+                    logger.warning(f"[ClawBot:{self.id}] 登录态探测超时（疑似网络抖动），先直接进入监听: {e}")
                     self.running = True
                     self.qr_status = "running"
-                    self.qr_message = "已恢复上次登录，正在监听消息"
+                    self.qr_message = "已恢复上次登录（探测超时，直接进入监听）"
                     self._start_updates_loop()
-                    logger.success(f"[ClawBot:{self.id}] 复用上次登录态，直接开始监听")
                     return True
-                logger.info(f"[ClawBot:{self.id}] 上次登录态已失效（ret={ret} errcode={errcode}），需重新扫码")
-            except Exception as e:
-                logger.warning(f"[ClawBot:{self.id}] 登录态探测失败，走二维码流程: {e}")
         old = self._find_thread("qr")
         if old and not force:
             return True  # 二维码已生成，等待扫码
@@ -580,7 +614,15 @@ class ClawBotChannel(BaseChannel):
                 return  # 机器人自己的消息
             # 不按 message_type 硬过滤（不同版本协议枚举不一致，漏过滤会导致消息丢失）：
             # 只要对方 id 合法、item_list 有内容就进入对话链路
-            self._sessions[from_user] = ctx
+            # context_token 变了就顺手落盘（重启后主动消息/早上补回还得靠它）
+            if ctx and self._sessions.get(from_user) != ctx:
+                self._sessions[from_user] = ctx
+                try:
+                    self._save_state()
+                except Exception:
+                    pass
+            else:
+                self._sessions[from_user] = ctx
             items = (msg or {}).get("item_list") or []
             texts = []
             images = []
@@ -633,6 +675,10 @@ class ClawBotChannel(BaseChannel):
             if merge:
                 user_id = str(self.config.get("merge_user_id") or "web_user").strip() or "web_user"
                 self._merged_remote[user_id] = from_user  # 记住该对话最近来自微信的联系人（主动消息回发）
+                try:
+                    self._save_state()   # 落盘：重启后主动消息仍能直接发到微信
+                except Exception:
+                    pass
             else:
                 user_id = f"wx_{self.id}__{from_user}"
             logger.info(f"[ClawBot:{self.id}] 收到消息 [{from_user}]: {content[:50]} 图片数={len(images)}")
@@ -658,6 +704,15 @@ class ClawBotChannel(BaseChannel):
         except Exception as e:
             logger.error(f"[ClawBot:{self.id}] 解析消息失败: {e}")
 
+    def _normalize_emoji_tags(self, txt: str) -> str:
+        """发送前把 [表情名] 换成标准 emoji：微信通道发不出表情图片、也不认 [名称] 格式。
+        统一走 channels.wechat_emoji.convert_emoji_tags（含别名表；认不出的去掉方括号保留文字），
+        原来这里自己查表、认不出替换成空串，会把句子咬掉一块（"我好[抱抱]" → "我好"）。"""
+        if not txt or "[" not in txt:
+            return txt
+        from channels.wechat_emoji import convert_emoji_tags
+        return convert_emoji_tags(txt)
+
     def _send_reply(self, from_user: str, reply):
         """把回复（str 或 (text, pieces)）按真人节奏逐条发送；每条都校验发送结果，失败即记日志并停止后续。"""
         ctx = self._sessions.get(from_user) or ""
@@ -668,7 +723,7 @@ class ClawBotChannel(BaseChannel):
             reply_text, pieces = reply, None
             items = [{"text": reply_text, "delay": 0}] if reply_text else []
         for i, p in enumerate(items):
-            txt = (p.get("text") or "").strip()
+            txt = self._normalize_emoji_tags((p.get("text") or "").strip())
             img = str(p.get("image") or p.get("image_url") or "").strip()
             if not txt and not img:
                 continue
@@ -691,14 +746,17 @@ class ClawBotChannel(BaseChannel):
     def send(self, user_id: str, text: str) -> bool:
         if not self._client.bot_token:
             return False
-        remote = self.resolve_remote(user_id)
+        # send 只会在「这条通道已被路由给自己」时被调用，允许唯一联系人回退
+        remote = self.resolve_remote(user_id, allow_fuzzy=True)
         if not remote:
             logger.warning(f"[ClawBot:{self.id}] 无法定位微信联系人（user_id={user_id}），主动消息不下发")
             return False
+        text = self._normalize_emoji_tags(text)
         ctx = self._sessions.get(remote) or ""
         if not ctx:
-            logger.warning(f"[ClawBot:{self.id}] 缺少 {remote} 的 context_token，无法发送主动消息")
-            return False
+            # 重启后还没收到过对方消息时就是没有 token。底层 _post_sendmessage 本来就支持
+            # 不带 token 发送（失败还会去 token 重试一次），所以这里照样尝试，不再直接放弃。
+            logger.info(f"[ClawBot:{self.id}] 暂无 {remote} 的 context_token，按无会话态尝试发送")
         try:
             self._start_typing(remote, ctx)
             try:
@@ -711,10 +769,13 @@ class ClawBotChannel(BaseChannel):
             logger.error(f"[ClawBot:{self.id}] 发送失败: {e}")
             return False
 
-    def resolve_remote(self, user_id: str) -> str:
+    def resolve_remote(self, user_id: str, allow_fuzzy: bool = False) -> str:
         """把栖语内部 user_id 解析成微信联系人 id（供主动消息回发）：
         - wx_<通道id>__<对方id> → 对方 id
-        - 单一对话合并后的 user_id（如 web_user） → 最近在该对话发过消息的微信联系人
+        - 单一对话合并后的 user_id（如 web_user） → 合并表里记过的微信联系人
+
+        allow_fuzzy=True（仅限「这条通道就是该对话自己绑的」时）才允许
+        「会话表/合并表里只剩一个联系人就猜是他」。默认 False，避免扫描别人的通道时猜错串号。
         """
         if not user_id:
             return ""
@@ -723,7 +784,37 @@ class ClawBotChannel(BaseChannel):
             _, _, remote = body.partition("__")
             if remote:
                 return remote
-        return str(self._merged_remote.get(user_id) or "")
+        hit = str(self._merged_remote.get(user_id) or "")
+        if hit:
+            return hit
+        merge_id = str((self.config or {}).get("merge_user_id") or "").strip()
+        if merge_id and user_id == merge_id:
+            hit = str(self._merged_remote.get(merge_id) or "")
+            if hit:
+                return hit
+        # 单一对话：会话表里往往只剩这一个微信联系人。
+        # merged_remote 没写上（只在网页聊过、或重启前那次没落盘）时，用它把找话发回微信。
+        if allow_fuzzy and bool((self.config or {}).get("single_conversation", True)):
+            keys = [str(k) for k in (self._sessions or {}) if k]
+            if len(keys) == 1:
+                self._remember_remote(user_id or merge_id, keys[0])
+                return keys[0]
+            if len(self._merged_remote) == 1:
+                only = next(iter(self._merged_remote.values()))
+                self._remember_remote(user_id or merge_id, only)
+                return str(only)
+        return ""
+
+    def _remember_remote(self, user_id: str, remote: str) -> None:
+        if not user_id or not remote:
+            return
+        if str(self._merged_remote.get(user_id) or "") == remote:
+            return
+        self._merged_remote[user_id] = remote
+        try:
+            self._save_state()
+        except Exception:
+            pass
 
     # ---------- 对方正在输入（iLink sendtyping） ----------
     def _get_typing_ticket(self, from_user: str, ctx: str) -> str:

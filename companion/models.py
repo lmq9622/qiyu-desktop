@@ -193,6 +193,242 @@ def _extract_json_object(text: str) -> str:
         return ""
     return t[start:end + 1]
 
+# 模型会把上下文里的时间线索（[刚刚]/【3分钟前】/[今天]）抄进正文，统一剥掉。
+# 位置不限：标签出现在句子中间时，说明模型是拿它当"两条气泡的分隔符"——
+# 这时换成换行，让下面按行拆条把一条拆成两条气泡（不能挤在一个气泡里）。
+_TIME_TAG_RE = re.compile(
+    r"[\[【(（]\s*(?:刚刚|更早|今天|昨天|前天|刚刚才|\d+\s*(?:分钟|小时|天)前)\s*[\]】)）]"
+)
+_TIME_TAG_SPACE_RE = re.compile(r"[ \t]{2,}")
+
+def strip_time_tag(text) -> str:
+    """剥掉抄进正文的时间标签；夹在句子中间的换成换行（当作分条记号）。"""
+    out = _TIME_TAG_RE.sub("\n", str(text or ""))
+    out = re.sub(r"[ \t]*\n[ \t]*", "\n", out)
+    return _TIME_TAG_SPACE_RE.sub(" ", out).strip()
+
+# 只含 ASCII 结构符号/空白的输出（"{"、"{}"、"[" 之类）当成无效输出，绝不发给用户
+_STRUCTURAL_ONLY_RE = re.compile(r'^[\s\[\]{}",:;\'`]+$')
+_JSON_FRAGMENT_RE = re.compile(r'"(?:messages|conversation_state|text|type|emotion_delta|relation_delta|memory)"\s*:')
+
+def _raw_has_usable_text(messages) -> bool:
+    """这段 messages（模型输出里的字段）里有没有至少一条可发的 text。"""
+    if isinstance(messages, dict):
+        messages = [messages]
+    if isinstance(messages, str):
+        return bool(messages.strip())
+    if not isinstance(messages, list):
+        return False
+    for item in messages:
+        if isinstance(item, dict) and str(item.get("text") or "").strip():
+            return True
+    return False
+
+def looks_like_broken_model_output(raw_text: str) -> bool:
+    """这段模型输出能不能变成至少一条可发的消息；不能就算坏输出。
+
+    弱模型偶尔只回 `{`、`{}`、`{"messages": [`，或回一个 messages 里 text 全空的 JSON。
+    老逻辑最后有一段"兜底成单条消息"，会把这些原样发给用户 —— 用户看到的就是一个 `{`。
+    """
+    t = str(raw_text or "").strip()
+    if not t:
+        return True
+    if _STRUCTURAL_ONLY_RE.match(t):
+        return True
+    obj = _extract_json_object(t)
+    if obj:
+        try:
+            data = json.loads(obj)
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            return not _raw_has_usable_text(data.get("messages"))
+        return True
+    if t[0] in "{[" and _JSON_FRAGMENT_RE.search(t):
+        return True
+    return False
+
+# 模型偶发吐出来的尾巴垃圾：连续逗号/顿号/省略号（"等你下课去找你啊，，，，，"）
+_TAIL_JUNK_RE = re.compile(r"[，,、；;．…\s]{2,}$")
+
+def _strip_tail_junk(t: str) -> str:
+    """去掉尾巴上的连续标点垃圾；清洗后为空则回退原串。"""
+    try:
+        out = _TAIL_JUNK_RE.sub("", (t or "").strip())
+        return out if out else (t or "").strip()
+    except Exception:
+        return t
+
+# 线下"到场"幻觉：只拦"角色声称自己人已经在用户身边 / 已经线下见面"，
+# 不再误杀日常寒暄与关心（"我在这呢，怎么啦" / "你出来吃饭了吗" / "早点睡别动气" /
+# "收到 我这就去写" / "我等你呢" 这些都必须放行）。收窄要点：
+#   · 必须带"你"字锚点（你楼下/你门口/你身边…）或明确的物理接触/开门/过来找你；
+#   · 单纯"我在/我到/我站/我等你/这就去写"不再命中。
+_PRESENCE_RE = re.compile(
+    # ① 声称已到/正在「你」所在地（你家楼下、你门口、你身边、你对面…）
+    r"我.{0,3}(?:到|在|站|蹲|坐|赶|走)(?:了)?你(?:家|楼下|楼上|门口|门(?:前|口)|身边|身旁|旁边|对面|面前|身后|这边|那边|那儿|这儿)"
+    # ② 命令对方开门 / 快点出来（= "我人就在门外"）
+    r"|开(?:一下)?门|快点(?:出|下)来"
+    # ③ 现在/马上 过来、过去找对方（线下）
+    r"|我.{0,4}(?:过来|过去)找"
+    # ④ 物理接触（线下动作描写）：抱住/搂住/牵住…你
+    r"|(?:抱住|抱着|搂住|搂着|牵住|牵着)你"
+    # ⑤ 让对方向"我这边"看 / 确认看到了我本人
+    r"|往我(?:这边|那儿|这)看|看到我(?:吗|了没|了没有|没)"
+    # ⑥ 独立"我到了"（后面不接地点宾语 = 到用户面前了）
+    r"|我到了(?=[，,。！!？?\s]|$|你|楼下|门口|楼底下)"
+)
+
+def _looks_like_presence_hallucination(t: str) -> bool:
+    """是否在假装"我人已经到现场了"（我到你家楼下了/我就在你门口/你往我这边看…）。
+
+    只抓"声称已在用户身边 / 已线下见面"，不误杀普通寒暄与关心。
+    """
+    try:
+        return bool(_PRESENCE_RE.search(t or ""))
+    except Exception:
+        return False
+
+# 行首是列表符号/编号 → 这一行不是新气泡边界，要并入上一条（清单/步骤不该被拆散）
+_LIST_ITEM_RE = re.compile(
+    r"^\s*(?:[-*•·+]\s+|(?:\d{1,2}[.、)）]\s*)|(?:[（(]\d{1,2}[)）]\s*)|(?:[一二三四五六七八九十]+[.、)]\s*))"
+)
+
+
+def _split_bubbles(text: str) -> list:
+    """把一段可能含换行的文本拆成若干气泡（真人微信逐条发的节奏）。
+
+    收窄旧实现"无条件按换行拆"导致的误拆：
+      · ``` 包裹的代码块**整段不拆**（连同围栏一起保留，含未闭合的）；
+      · 行首是列表符号/编号（- * • 1. 1、 (1) 一、 …）的行，或带缩进的行 → 并入上一行；
+      · 以上一行冒号（：/:）结尾时，与紧随其后的内容并成一条（「给你写个清单：」+清单）；
+      · 其余才按换行拆。
+    返回去掉空段后的列表；全空时回退 [strip 后的原文]。
+    """
+    t = str(text or "")
+    if not t.strip():
+        return []
+    lines = t.split("\n")
+    segs: list = []
+    cur = ""
+    code_buf = None   # None = 不在代码块内；list = 正在累积的代码块行
+
+    def _flush():
+        nonlocal cur
+        if cur.strip():
+            segs.append(cur.strip())
+        cur = ""
+
+    for line in lines:
+        s = line.strip()
+        if code_buf is not None:
+            code_buf.append(line)
+            if s.startswith("```"):
+                segs.append("\n".join(code_buf).strip())
+                code_buf = None
+            continue
+        if s.startswith("```"):
+            _flush()
+            code_buf = [line]
+            continue
+        if not s:
+            _flush()                     # 空行 = 气泡边界
+            continue
+        indented = line[:1] in (" ", "\t", "　")
+        if _LIST_ITEM_RE.match(s) or (indented and cur):
+            # 列表项 / 缩进行 → 并入上一条
+            cur = (cur + "\n" + s) if cur else s
+            continue
+        if cur and cur.rstrip().endswith(("：", ":")):
+            # 冒号结尾的行与后续并成一条
+            cur = cur + "\n" + s
+            continue
+        _flush()
+        cur = s
+    if code_buf is not None:
+        segs.append("\n".join(code_buf).strip())   # 未闭合的代码块也整段保留
+    _flush()
+    return segs or [t.strip()]
+
+
+def _split_long_bubbles(msgs: list, limit: int = 26) -> list:
+    """兜底用：单条太长又**带空格**时，只按空格折成多条短气泡。
+
+    规则收窄成用户要求的样子：
+    - **只按空格（含全角空格/换行）拆**，不按标点拆，**绝不按字数硬切**
+    - 没有空格就原样保留（长短交给提示词去管，这里不动）
+    - 折出来的段数最多 4 条，第 2 条起隔 700ms
+    """
+    out = []
+    for m in msgs or []:
+        t = str(m.get("text") or "").strip()
+        if len(t) <= limit:
+            out.append(m)
+            continue
+        parts = [x.strip() for x in re.split(r"[\s　]+", t) if x.strip()]
+        if len(parts) <= 1:
+            out.append(m)          # 没空格 → 不拆（不硬拆、不按标点拆）
+            continue
+        merged, cur = [], ""
+        for seg in parts:
+            if cur and len(cur) + 1 + len(seg) > limit:
+                merged.append(cur)
+                cur = seg
+            else:
+                cur = (cur + " " + seg) if cur else seg
+        if cur:
+            merged.append(cur)
+        merged = [x for x in merged if x][:4]
+        if len(merged) <= 1:
+            out.append(m)
+            continue
+        for k, seg in enumerate(merged):
+            out.append({"text": seg, "type": m.get("type", "statement"),
+                        "delay": 0 if k == 0 else 700})
+    return out
+
+def _dedup_consecutive_bubbles(msgs: list) -> list:
+    """去掉连续重复气泡（模型有时把同一句发两遍）。"""
+    out, prev = [], ""
+    for m in msgs or []:
+        t = str(m.get("text") or "").strip()
+        if t and t == prev:
+            continue
+        out.append(m)
+        prev = t or prev
+    return out
+
+def postprocess_reply_messages_extra(parsed: dict, longform: bool = False) -> dict:
+    """回复后处理的补充护栏（服务器版 _postprocess_reply_messages 里桌面缺的那几项）：
+    尾巴垃圾清洗 → 到场幻觉拦截 → 连续重复气泡去重 → 过长气泡按空格拆分。
+    就地修改 parsed["messages"] 并返回 parsed。
+
+    只纠正明显错误、不改写正常回复。全部被拦空时**返回空 messages**（不再回退首条）——
+    上层自有兜底：behavior._postprocess_reply_messages 之后 streaming 路径
+    （demo.py）对空 messages 会重拉一次，仍空则回「在呢 / 刚走神了一下」这类自然话。
+    """
+    msgs = parsed.get("messages") or []
+    if not msgs:
+        return parsed
+    cleaned = []
+    for m in msgs:
+        t = _strip_tail_junk(m.get("text", ""))
+        if not t:
+            continue
+        # 到场幻觉整条丢弃（角色不能真的出现在用户面前）
+        if _looks_like_presence_hallucination(t):
+            continue
+        cleaned.append({**m, "text": t})
+    # 全被拦空 → 留空，交给上层空回复兜底（不回退首条）
+    if not cleaned:
+        parsed["messages"] = []
+        return parsed
+    cleaned = _dedup_consecutive_bubbles(cleaned)
+    if not longform:
+        cleaned = _split_long_bubbles(cleaned)
+    parsed["messages"] = cleaned
+    return parsed
+
 def parse_chat_messages(raw_text: str) -> dict:
     """解析模型输出的微信消息 JSON → {"conversation_state", "relation_delta", "relationship", "messages":[{text,type,delay}]}
     模型输出漂移时自动兜底为单条消息，不让对话断掉。
@@ -237,6 +473,9 @@ def parse_chat_messages(raw_text: str) -> dict:
                 text = str(m.get("text") or "").strip()
                 if not text:
                     continue
+                text = strip_time_tag(text)              # 时间标签剥掉；夹在中间的当分条记号
+                if not text:
+                    continue
                 mtype = str(m.get("type") or "").strip().lower()
                 if mtype not in CHAT_MSG_TYPES:
                     mtype = "statement"
@@ -244,12 +483,19 @@ def parse_chat_messages(raw_text: str) -> dict:
                     delay = int(float(str(m.get("delay") or 0)))
                 except Exception:
                     delay = 0
-                delay = _normalize_delay(state, i, delay, total_hint=len(raw_msgs))
-                _item = {"text": text[:3000], "type": mtype, "delay": delay}
-                img = str(m.get("image_url") or "").strip()
-                if img:
-                    _item["image_url"] = img[:2000]
-                messages.append(_item)
+                # 模型偶尔把两条气泡塞进同一个 text（用换行分隔），微信里就会渲染成
+                # 「一条消息中间换行」而不是两条气泡 —— 这里统一按行拆开。
+                # 但代码块整段不拆、列表项/冒号引导的清单并入上一条（用 _split_bubbles）。
+                chunks = _split_bubbles(text) or [text]
+                for ci, chunk in enumerate(chunks):
+                    _delay = _normalize_delay(state, i + ci, delay,
+                                              total_hint=len(raw_msgs) + len(chunks) - 1)
+                    _item = {"text": chunk[:3000], "type": mtype, "delay": _delay}
+                    if ci == 0:
+                        img = str(m.get("image_url") or "").strip()
+                        if img:
+                            _item["image_url"] = img[:2000]
+                    messages.append(_item)
     if not messages:
         raw = (raw_text or "").strip()
         # 兜底1：模型 JSON 被截断/损坏时，提取里面已输出的 text 片段当消息，绝不把原始 JSON 当消息发出去
@@ -260,11 +506,23 @@ def parse_chat_messages(raw_text: str) -> dict:
                 if t:
                     texts.append(t)
             if texts:
-                for i, t in enumerate(texts[:60]):
+                # 兜底分支也要按行拆：模型把两条气泡塞进一个 text 时，
+                # 这里不拆的话用户看到的还是"一条消息中间换行"。
+                flat = []
+                for t in texts[:60]:
+                    flat.extend(_split_bubbles(strip_time_tag(t)) or [t])
+                for i, t in enumerate(flat):
                     messages.append({"text": t[:3000], "type": "statement",
-                                     "delay": _normalize_delay("闲聊", i, 0, total_hint=len(texts))})
-        if not messages and raw:
-            messages.append({"text": raw[:3000], "type": "statement", "delay": 0})
+                                     "delay": _normalize_delay("闲聊", i, 0, total_hint=len(flat))})
+        if not messages and raw and not looks_like_broken_model_output(raw):
+            # 走到这里说明模型没吐 JSON（常见于"把已生成好的整段回复再喂回解析器"）：
+            # 以前整段塞进一个气泡 → 用户看到"两条消息挤在一个气泡里、中间换行"。
+            # 现在照样按行拆成独立气泡（时间标签一起剥掉）；坏输出（"{"、"{}"）直接丢弃。
+            _raw2 = strip_time_tag(str(raw).replace("\\n", "\n"))
+            _fb = _split_bubbles(_raw2)
+            for _i, _t in enumerate(_fb[:60] or [raw]):
+                messages.append({"text": _t[:3000], "type": "statement",
+                                 "delay": _normalize_delay("闲聊", _i, 0, total_hint=len(_fb))})
         # 模型确实什么都没输出：返回空列表，绝不注入假"……"思考气泡（thinking 由流式 reasoning 通道承载）
     schedules = []
     if isinstance(data, dict):
@@ -375,6 +633,9 @@ def _try_stream_parse(buf: str):
             text = str(m.get("text") or "").strip()
             if not text:
                 continue
+            text = strip_time_tag(text)
+            if not text:
+                continue
             mtype = str(m.get("type") or "").strip().lower()
             if mtype not in CHAT_MSG_TYPES:
                 mtype = "statement"
@@ -382,14 +643,20 @@ def _try_stream_parse(buf: str):
                 delay = int(float(str(m.get("delay") or 0)))
             except Exception:
                 delay = 0
-            delay = _normalize_delay(state, i, delay, total_hint=len(data["messages"]))
-            msgs.append({"text": text[:3000], "type": mtype, "delay": delay})
+            # 与 parse_chat_messages 保持同一套拆条规则（真换行/句中时间标签；
+            # 代码块整段不拆、列表项并入上一条）：
+            # 否则流式预览与最终解析的条数不一致，demo 的 safe_pushed 会重复推送气泡。
+            chunks = _split_bubbles(text) or [text]
+            for ci, chunk in enumerate(chunks):
+                _delay = _normalize_delay(state, i + ci, delay,
+                                          total_hint=len(data["messages"]) + len(chunks) - 1)
+                msgs.append({"text": chunk[:3000], "type": mtype, "delay": _delay})
         return state, msgs
     return None
 
 def _normalize_delay(state: str, index: int, delay: int, total_hint: int = 0) -> int:
-    """真人节奏：第一条即时反应；情绪状态连发无延迟；普通状态每条之间默认 3~5 秒。
-    长内容（讲故事/长文，消息 10 条以上）中后段加快到 1~1.5 秒，避免整段故事拖几分钟才播完。"""
+    """真人节奏：第一条即时反应；情绪状态连发无延迟；普通状态每条之间 0.3~2 秒。
+    长内容（讲故事/长文，消息 10 条以上）中后段加快到 0.3~1.5 秒，避免整段故事拖几分钟才播完。"""
     delay = max(0, min(8000, delay))
     if index == 0:
         return max(0, min(800, delay))
@@ -397,7 +664,7 @@ def _normalize_delay(state: str, index: int, delay: int, total_hint: int = 0) ->
         return max(0, min(800, delay))
     if total_hint >= 10 and index >= 8:
         return max(300, min(1500, delay))
-    return max(3000, delay)
+    return max(300, min(2000, delay))
 
 def _parse_schedule_time(at_str: str) -> float | None:
     """解析提醒时间：支持 YYYY-MM-DD HH:MM 或 HH:MM（今天已过则明天），返回 epoch"""
@@ -491,8 +758,11 @@ __all__ = [
     "_to_int",
     "_try_stream_parse",
     "_unescape_json_text",
+    "looks_like_broken_model_output",
     "parse_chat_messages",
     "parse_persona_params",
     "parse_resume",
+    "postprocess_reply_messages_extra",
     "resume_to_text",
+    "strip_time_tag",
 ]

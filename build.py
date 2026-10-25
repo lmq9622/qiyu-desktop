@@ -21,7 +21,19 @@ ICON_FILE = PROJECT_ROOT / "assets" / "icon.ico"  # 如果有图标的话
 DIST_DIR = PROJECT_ROOT / "dist"
 BUILD_DIR = PROJECT_ROOT / "build"
 SPEC_FILE = PROJECT_ROOT / f"{OUTPUT_NAME}.spec"
-VERSION = "0.0.22"   # M9 打包版本（每次打包顺延 +0.0.1）
+VERSION = "1.0.0"   # M9 打包版本（每次打包顺延 +0.0.1）
+
+
+def package_dir() -> Path:
+    """打包产物目录 = 用户拿到的那一层（sidecar 必须放这里）。
+
+    - onedir（默认）：dist/Qiyu/，Qiyu.exe 就在这里；
+    - onefile：dist/，Qiyu.exe 在这里。
+    运行时 config/wechaty/models 都是按「exe 同目录」找的（见 config/__init__.py、
+    channels/wechaty_channel.py、runtime.get_models_dir），放错一层就会静默降级。
+    """
+    onefile = str(os.environ.get("QIYU_ONEFILE", "")).strip() in ("1", "true", "yes")
+    return DIST_DIR if onefile else DIST_DIR / OUTPUT_NAME
 
 # ============ 检查环境 ============
 def check_env():
@@ -129,6 +141,9 @@ def build():
         ("gateway/router.py", "gateway"),
         ("gateway/__init__.py", "gateway"),
         ("demo.py", "."),
+        ("assets/icon.ico", "assets"),
+        ("assets/icon.png", "assets"),
+        ("assets/logo.png", "assets"),
     ]
     
     for src, dst in resources:
@@ -248,8 +263,9 @@ def build():
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--name", OUTPUT_NAME,
-        "--onefile",           # 单文件模式（方便分发）
-        # "--onedir",          # 如果要多文件模式（启动更快），注释掉上一行，取消这行注释
+        # 默认 onedir：启动直接跑，不用每次把 285MB 解压到临时目录（onefile 首次启动 10–20s）。
+        # 要单文件分发时设 QIYU_ONEFILE=1。
+        *(["--onefile"] if str(os.environ.get("QIYU_ONEFILE", "")).strip() in ("1", "true", "yes") else ["--onedir"]),
         "--windowed",          # 不显示控制台窗口
         "--noconfirm",         # 不确认覆盖
         "--clean",             # 清理临时文件
@@ -260,6 +276,21 @@ def build():
     # 添加 hidden imports
     for imp in hidden_imports:
         cmd.extend(["--hidden-import", imp])
+
+    # qy3fengine：桌面端角色包引擎（vendor 目录，不走 pip 安装）
+    # hidden-import 单独用不可靠（实测 _internal 里没有），所以把整棵源码树
+    # 作为 data 放进 _internal/qy3fengine —— 运行时它就在 sys.path 上，import 得到。
+    if (PROJECT_ROOT / "qy3fengine" / "__init__.py").exists():
+        cmd.extend(["--paths", str(PROJECT_ROOT)])
+        cmd.extend(["--add-data", f"{PROJECT_ROOT / 'qy3fengine'}{os.pathsep}qy3fengine"])
+        for _imp in ("qy3fengine",
+                     "qy3fengine.container",
+                     "qy3fengine.core.export",
+                     "qy3fengine.core.import_",
+                     "qy3fengine.core.validate",
+                     "qy3fengine.rag.memory_recall",
+                     "qy3fengine.rag.vector_store"):
+            cmd.extend(["--hidden-import", _imp])
 
     # 添加排除模块
     for mod in excluded_modules:
@@ -307,7 +338,7 @@ def build():
         # 复制 Wechaty 网关目录（gateway.js / package.json / install.bat，不含 node_modules）
         try:
             src_gw = PROJECT_ROOT / "wechaty"
-            dst_gw = DIST_DIR / "wechaty"
+            dst_gw = package_dir() / "wechaty"
             if src_gw.exists():
                 dst_gw.mkdir(parents=True, exist_ok=True)
                 for fname in ("gateway.js", "package.json", "install.bat"):
@@ -330,10 +361,28 @@ def build():
 
 
 # ============ 快速模式（用 spec 文件） ============
+def spec_points_here(spec_text: str, root: Path) -> bool:
+    """spec 中入口脚本的绝对路径是否位于 root 之下（大小写、斜杠方向不敏感）"""
+    import re
+    m = re.search(r"Analysis\(\s*\[\s*['\"]([^'\"]+)['\"]", spec_text)
+    if not m:
+        return False
+    norm = lambda p: os.path.normcase(os.path.abspath(p))
+    entry, base = norm(m.group(1)), norm(str(root))
+    return entry == base or entry.startswith(base + os.sep)
+
+
 def build_fast():
     """使用已有 spec 文件快速构建（第二次以后）"""
     if not SPEC_FILE.exists():
         print("没有找到 .spec 文件，请先运行完整构建")
+        return False
+    # spec 里写的是生成它那台机器的绝对路径。仓库里带的旧 spec 指向服务器版目录
+    # （D:/Codex projects/.../ai-companion），在那台机器上 --fast 不会报错，
+    # 而是把**服务器版的代码**打进桌面版 exe。路径不在本项目下就拒绝，改走完整构建。
+    if not spec_points_here(SPEC_FILE.read_text(encoding="utf-8", errors="ignore"), PROJECT_ROOT):
+        print(f"[FAIL] {SPEC_FILE.name} 里的路径不指向本项目（{PROJECT_ROOT}），"
+              "--fast 会打包别处的代码。请运行完整构建：python build.py")
         return False
     
     cmd = [sys.executable, "-m", "PyInstaller", str(SPEC_FILE), "--noconfirm", "--clean"]
@@ -345,7 +394,7 @@ def create_sidecars():
     """M5（规格§10）：构建可独立更新的 sidecar 目录。
     Qiyu.exe + runtime/ + backends/ + models/ + assets/ + config/ + tools/ + wechaty/
     模型 / 后端 / 配置不物理塞进 EXE：更新 Vulkan backend 不用重新下载整个模型。"""
-    base = DIST_DIR
+    base = package_dir()
     base.mkdir(parents=True, exist_ok=True)
     # 版本标记
     try:
@@ -378,6 +427,19 @@ def create_sidecars():
         print(f"[OK] sidecar tools: web.py / install_models.py 已复制")
     except Exception as e:
         print(f"[WARN] 复制 tools 工具失败: {e}")
+    # 可选：把仓库里已有的权重一起复制进 sidecar（QIYU_COPY_MODELS=1）。
+    # 默认不复制：权重 139 MB，放进安装包会让体积从 683 MB 涨到 820 MB+。
+    if str(os.environ.get("QIYU_COPY_MODELS", "")).strip() in ("1", "true", "yes"):
+        try:
+            src_models = PROJECT_ROOT / "models"
+            dst_models = base / "models"
+            if src_models.exists():
+                shutil.copytree(src_models, dst_models, dirs_exist_ok=True)
+                total = sum(f.stat().st_size for f in dst_models.rglob("*") if f.is_file())
+                print(f"[OK] 已复制 models/（{total / 1024 / 1024:.1f} MB）")
+        except Exception as e:
+            print(f"[WARN] 复制 models/ 失败: {e}")
+
     # M6：models/ 说明安装器用法
     try:
         models_readme = base / "models" / "README.txt"
@@ -401,6 +463,10 @@ def create_sidecars():
     if ICON_FILE.exists():
         try:
             shutil.copy2(ICON_FILE, base / "assets" / "icon.ico")
+            for _extra in ("icon.png", "logo.png"):
+                _src = PROJECT_ROOT / "assets" / _extra
+                if _src.exists():
+                    shutil.copy2(_src, base / "assets" / _extra)
         except Exception as e:
             print(f"[WARN] 复制图标失败: {e}")
     print("[OK] sidecar 结构完成: runtime/ backends/ models/ assets/ config/ tools/")

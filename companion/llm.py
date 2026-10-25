@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Qiyu LLM 客户端（Main Brain 适配层，从 demo.py 迁移，M1）。"""
+import os
 import json
 import re
 import time
@@ -24,6 +25,7 @@ channel_registry = get_channel_registry()
 
 from companion.constants import _SEARCH_CLAIM_RE, LEVEL_LABEL, LEVEL_PCT, PEER_ROLE_PROMPT
 from companion.state import LLM_MODEL, LLM_ROUTE_URL, LLM_URL, _EVIDENCE_CACHE
+from companion.mbti_voice import build_mbti_voice_block, mbti_profile
 from companion.models import _msg_text, parse_chat_messages
 from companion.settings import _apply_thinking_kwargs, _current_time_block, _desire_block, _desire_value, _is_longform_request, _persona_profile, _route_llm_info, _user_gender_block, _user_network_context, build_resume_prompt, is_injection, load_runtime_settings
 from companion.relations import _clamp_int, _init_relation, _is_night, _relation_block
@@ -32,6 +34,109 @@ from companion.emotions import _emotion_prompt_block
 from companion.behavior import _attention_prompt_block, _classify_topic_shift, _finalize_chat_reply, _find_recent_fact, _recall_probe_target, _story_state
 from companion.active import _looks_like_search, llm_limiter
 from runtime.providers import MainBrainProvider, ProviderStatus
+
+
+# ---------------------------------------------------------------------------
+# 云端 API / 自托管端点的差异处理，与采样温度解析（从服务器版移植）
+# ---------------------------------------------------------------------------
+
+def _is_self_hosted(url: str) -> bool:
+    """判断端点是不是自建推理服务（vLLM / llama.cpp）。
+
+    只有自建服务才认 chat_template_kwargs / thinking_budget 这类本地扩展字段；
+    官方云 API（DeepSeek / OpenAI / 通义…）会把它当未知参数直接 400，
+    老代码靠"先收到 400 再摘掉重发"兜底 —— 每个请求都白跑一次往返。
+    """
+    m = re.search(r"https?://([^/:]+)", str(url or ""))
+    host = (m.group(1) if m else "").lower()
+    if not host:
+        return True
+    if host in ("localhost", "127.0.0.1", "::1", "host.docker.internal"):
+        return True
+    if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", host):
+        return True
+    return host.endswith((".local", ".lan", ".internal", ".home"))
+
+
+def _strip_local_only_kwargs(payload: dict, url: str = "") -> dict:
+    """非自托管（云端 API）端点：发请求前就把本地扩展字段摘掉，别等 400 再重发一次。"""
+    if _is_self_hosted(url):
+        return payload
+    for k in ("chat_template_kwargs", "thinking_budget", "cache_reuse", "reasoning_format"):
+        payload.pop(k, None)
+    return payload
+
+
+def resolve_chat_temperature(char_id: str, temperature: float = 0.0) -> float:
+    """决定本轮采样温度：显式传入 > 角色卡温度 > 全局「回复温度」> 0.7。
+
+    之前 chat/chat_stream 的 temperature 默认写死 0.7，角色卡的 temperature 和
+    设置页那个「回复温度」滑块都不生效（拖了没用）。
+    """
+    try:
+        if temperature and float(temperature) > 0:
+            return float(temperature)
+    except Exception:
+        pass
+    try:
+        ch = char_mgr.get_character(char_id)
+        t = float(getattr(ch, "temperature", 0) or 0)
+        if t > 0:
+            return t
+    except Exception:
+        pass
+    try:
+        t = float((load_runtime_settings() or {}).get("default_temperature") or 0)
+        if t > 0:
+            return t
+    except Exception:
+        pass
+    return 0.7
+
+
+def _stream_gap_timeout(url: str = "") -> float:
+    """流式调用的「数据间隔超时」（秒）：两次数据之间超过这个时长没动静就断开。
+
+    主模型默认 60s（QIYU_MAIN_LLM_TIMEOUT）；其余端点默认 420s（QIYU_LLM_TIMEOUT）。
+    这是"间隔"超时不是"整体"超时：一旦开始出字，token 之间不断刷新计时，
+    长回复不会被误杀；只有真的卡住（首字 60s 不出来）才会断，前端不用干等 7 分钟。
+    """
+    is_main = (not url) or (str(url).rstrip("/") == (LLM_URL or "").rstrip("/"))
+    return float(int(os.getenv("QIYU_MAIN_LLM_TIMEOUT", "60")) if is_main
+                 else int(os.getenv("QIYU_LLM_TIMEOUT", "420")))
+
+
+def _capture_explicit_user_facts(user_id: str, text: str):
+    """显式自我介绍/忌口直接入档，避免模型漏调记忆工具。"""
+    if not user_id or not text:
+        return
+    facts = []
+    m = re.search(r"我叫([\u4e00-\u9fa5A-Za-z0-9]{1,12})", text)
+    if m:
+        facts.append("用户叫" + m.group(1))
+    m = re.search(r"我最怕([^，。！？,.!?\s]{1,12})", text)
+    if m:
+        facts.append("用户最怕" + m.group(1))
+    if not facts:
+        return
+    try:
+        profile = str(mem_mgr.get_user_profile(user_id) or "")
+        for fact in facts:
+            if fact not in profile:
+                mem_mgr.add_user_fact(user_id, fact)
+    except Exception as e:
+        logger.warning(f"[记忆] 显式事实入档失败: {e}")
+
+
+def _with_system(system_msg: str, messages: list, model: str) -> list:
+    """部分本地中枢（wb-*）会丢弃 system 角色、只认 user。
+
+    这类模型把 system 当空气，必须把设定塞进第一条 user，否则人设/短句规则全部失效。
+    """
+    if str(model or "").lower().startswith("wb-"):
+        return [{"role": "user", "content": "【系统设定（必须遵守，不要复述）】\n" + system_msg}] + list(messages)
+    return [{"role": "system", "content": system_msg}] + list(messages)
+
 
 class LLMClient(MainBrainProvider):
     """LLM 客户端（实现 runtime.MainBrainProvider，业务层经 Provider 接口访问，
@@ -43,6 +148,7 @@ class LLMClient(MainBrainProvider):
     def __init__(self):
         super().__init__()
         self.available = False
+        self._persona_used_names = []
         self._check_llm()
 
     def probe(self) -> ProviderStatus:
@@ -64,15 +170,39 @@ class LLMClient(MainBrainProvider):
         return await self.summarize_text(prompt, max_tokens=max_tokens)
     
     def _check_llm(self):
+        """探活：必须带上 Authorization（有 api_key 时）。
+
+        老实现是裸 GET /models —— 所有需要鉴权的端点都会回 401，
+        于是 available 永远 False，只有日志里那句"服务返回异常状态码: 401"。
+        """
         try:
-            resp = httpx.get(f"{LLM_URL}/models", timeout=5)
+            headers = {}
+            try:
+                key = str((load_runtime_settings() or {}).get("api_key") or "").strip()
+            except Exception:
+                key = ""
+            if key:
+                headers["Authorization"] = f"Bearer {key}"
+            resp = httpx.get(f"{LLM_URL}/models", headers=headers, timeout=8)
             if resp.status_code == 200:
                 self.available = True
                 logger.success(f"LLM 服务就绪: {LLM_URL}")
+            elif resp.status_code in (401, 403):
+                # 端点可达但鉴权没过：不当成"服务不可用"，真正判定交给实际对话；
+                # 保持 available=False，避免把坏 Key 当成已就绪。
+                logger.warning(f"LLM 端点可达，但 /models 返回 {resp.status_code}（{LLM_URL}）")
             else:
-                logger.warning(f"LLM 服务返回异常状态码: {resp.status_code}")
+                # 404/405/400/5xx：很多本地中枢不实现 /models，不能据此判死；
+                # 只要拿到 HTTP 响应就当端点可达，对话时再暴露真实错误。
+                self.available = True
+                logger.warning(f"LLM 端点可达（/models 返回 {resp.status_code}），以实际对话为准: {LLM_URL}")
         except Exception as e:
             logger.warning(f"LLM 服务未就绪: {e}")
+
+    def refresh(self) -> bool:
+        """设置变更后重新探活（同步）。返回是否可达。"""
+        self._check_llm()
+        return self.available
     
     async def _build_chat_system_msg(self, char_id: str, messages: list,
                                      user_id: str = "", use_memory: bool = True, use_rag: bool = True,
@@ -84,6 +214,8 @@ class LLMClient(MainBrainProvider):
             if msg.get("role") == "user":
                 user_input = _msg_text(msg.get("content", ""))
                 break
+        if user_id and user_input:
+            _capture_explicit_user_facts(user_id, user_input)
 
         # 意图路由
         router = get_router()
@@ -109,11 +241,13 @@ class LLMClient(MainBrainProvider):
             pass
         system_parts.append(
             "【语气红线（真人感的底线，逐条遵守）】\n"
-            "- 不要每句都带语气词：连续用「哇/嘿嘿/哎呀/哈哈/绝了/馋馋/呢」会像网聊机器人，一整段对话最多出现一两个，能不用就不用。\n"
+            "- 你是真人，不是助手/产品：永远用第一人称「我」；被问「你是谁/认识我吗/介绍你自己/你是不是 AI」时，不要用第三人称报简历，先反问一句（「啊？」「你猜」「咋突然问这个」），用你自己的名字，绝不提 AI、模型、程序、助手。\n"
+            "- 语气词/口癖按下方【MBTI 说话方式】里你的类型来；没有 MBTI 就用中性口语，不要固定套「哟/啊/耶/啦」，尤其禁止用「哟」开场。\n"
+            "- 不要每句都带语气词：同一句里别叠两个以上；一段对话里同一个语气词不要连续出现三次。\n"
             "- 禁止夸张比喻和网络梗：「云吃一口」「坨成水泥」「被外星人抓去拯救世界」「喂——螺蛳粉都要坨成水泥啦」这类为了卖萌或好笑硬编的句子，直接删掉。真人随口说话，不表演。\n"
             "- 感叹号默认不用，禁止「！！」「！！！」，一个感叹号也尽量少用（「卧槽」「可以啊」「6」本来就不需要感叹号）；「？？？」表达无语/意外可以，但别每轮都用。\n"
             "- emoji 别每句都带：普通聊天最多一个；情绪上来（无语/开心/嘲讽/笑死）可以连发 2~3 个同一个表情；互喷/阴阳/不想说话时可以一条只发表情怼回去。按人设和上下文决定。\n"
-            "- 消息条数（硬约束）：普通聊天 1~2 条、最多 3 条；情绪真的上来（狂喜/暴怒/笑死/吵架）最多 4~5 条且条条短；一口气连发 6 条以上会像表演/话痨，直接砍掉。只有用户明确要求长内容（讲故事/写东西/详细介绍）才进入『完整输出模式』：连续发十几条甚至几十条把内容讲完整，不要只开个头就停。\n"
+            "- 消息条数（硬约束）：普通聊天一次 1~3 条；每条不超过 15 个字，多数就 2~6 个字（「嗯」「行」「真的假的」「笑死」这种长度）；不要固定「反应+追问」两气泡模板，能一条说完就一条；同一段对话里「咋了/怎么了」最多出现一次。只有用户明确要求长内容（讲故事/写东西/详细讲）才进入长文模式：1~4 条、每条不超过 80 字（第一条可以短）、总长 150~400 字，不要拆成十几条短气泡。\n"
             "- 关心和追问要像真人一样直接：「你吃啥了」「啥时候回来」；不要「你倒是说一声嘛，别让我流口水呀」这种撒娇式催促。\n"
             "- 收到对方的好消息（升职/中奖/夸赞/新玩具），别整套「哇！！恭喜恭喜呀！🎉」；自然点：「卧槽 牛啊」「可以啊」「真的假的」「爽了」，「恭喜恭喜」说一次就够，别叠「恭喜恭喜恭喜」。按人设来，损友可以调侃「就这？」。\n"
             "- 安慰别每次都用「抱抱/摸摸头/怎么突然」开头：先直接接住具体的事（「咋了」「因为啥」「严重吗」），反应因人设而不同，可以怼一句再递话，别像客服关怀模板。\n"
@@ -137,29 +271,32 @@ class LLMClient(MainBrainProvider):
             "- 不必把话接满：对方随口一句（吐槽、报备、发个表情），你可以只回一个词、一个表情，"
             "甚至直接说『忙，晚点说』；这比硬聊更像人。\n"
             "- 少解释因果：真人很少说『因为……所以……』，也不用解释自己为什么这么回。\n"
-            "- 长度要有起伏：多数消息 5~15 个字，偶尔来一句长的；不要每条都差不多长、差不多热情。\n"
+            "- 长度要有起伏：多数消息 2~6 个字，偶尔来一句长的也不超过 15 个字；不要每条都差不多长、差不多热情。\n"
             "- 对方一次发了好几条：挑对你最有反应的一两条接，不要一条一条按顺序全回一遍（那是客服不是聊天）。\n"
             "- 该收尾就收尾：真人聊着会自然去忙——『我先去洗澡』『吃饭去了』『晚点说』『睡了』，"
             "说完就走，不用每次都留个话头等对方接。\n"
             "- 少用书面衔接：『其实』『不过话说回来』『对了』『总之』这类过场词，能删就删；"
             "口语句子直接从事儿开始。"
         )
-        # 生成前内部判断：先感知 → 判断状态 → 决定反应 → 才生成文字（这些字段不输出、不向用户说明）
+        # 只要第一反应，不要先组织答案（组织答案会立刻变成 agent 腔）
         system_parts.append(
-            "【生成前内部判断（只在你脑子里过一遍，不要输出、不要向用户解释）】\n"
-            "1. reply_intent：先想清楚你这轮到底是 回应/提问/调侃/反驳/安慰/拒绝/继续故事/检查对方在不在/回忆/纠正/沉默/等待 中的哪一种（可以是几种混合），再决定说什么。你不是每轮都要『回答问题+解释+追问』，真人的回复经常只是『草』『啊？』『行』『真的假的』『你有病吧』『笑死』，这本身就是完整回复。\n"
-            "2. response_necessity：这轮需要回多满？对方只发了『嗯/哦/行/哈哈/好』这类 → MINIMAL，回一个字或一个表情就够，别展开；正常接话 → NORMAL，1~2 条；对方兴致高、讲到一半或正在兴头上 → ENGAGED，可以多接几句；对方明确要详细内容 → DETAILED。\n"
-            "3. 多气泡不是目的：先在脑子里决定『我这轮要说的就一件事/两三件事』，再自然拆成对应气泡；绝不是先写一整段再切成几段。情绪上来才连发，发完就停。\n"
-            "4. 只有遇到『真的不确定/信息确实久远/多个记忆冲突』才允许短暂犹豫（最多 1~2 个气泡）；对方刚刚才说过的事，直接答，别演回忆。"
+            "【第一反应】先想你看到这句话的第一反应是什么，把那一句发出去；有第二句再发，没有就停。不要先在脑子里组织完整答案。"
         )
+        # 笑话专用：2~4 条，直接讲，最后一句是包袱
+        if any(k in (user_input or "") for k in ("笑话", "搞笑", "段子")):
+            system_parts.append(
+                "【讲笑话（本次专用）】2~4 条短句；直接讲内容，不要用「行/好/我讲个」开场；"
+                "最后一句就是包袱，不要解释笑点。"
+            )
         # 完整输出模式：用户明确要讲故事/写长文/详细介绍，或上一轮 AI 已答应、这轮用户推进 → 必须本轮讲完
         if _is_longform_request(user_input, messages):
             system_parts.append(
                 "【完整输出模式（本次必须执行，最高优先级）】用户明确要求完整的长内容（讲故事/写东西/详细介绍/展开讲），"
                 "并且已经等你这轮把内容发出来。这一轮 messages 必须直接把完整内容发完：按自然段落拆成多条消息连续发"
-                "（每条一小段或一两句，仍像微信聊天，delay 正常停顿），从开头一直讲到自然收尾。"
+                "（1~4 条，每条不超过 80 个字（第一条可以短），总长 150~400 字；不要拆成十几条短气泡），从开头一直讲到自然收尾。"
                 "绝对禁止只发开场白就停（比如『行，那我讲个故事』『你躺好了』『我先开个头』）；"
-                "内容长就连续发十几条甚至几十条把整段讲完，不要中断等用户催，不要反问确认。"
+                "内容长就一次讲到收尾，最多 4 条，不要中断等用户催，不要反问确认。"
+                "内容里带一句自己的经历或不确定（「我试过」「我也没坚持下来」），别写成四条并列建议。"
             )
             # 讲故事节奏：听众感知（概率性，不机械，不固定台词）
             _st_st = _story_state(user_id, char_id) if (user_id and char_id) else {"active": False, "bubbles": 0}
@@ -179,9 +316,30 @@ class LLMClient(MainBrainProvider):
         )
 
         if char:
-            system_parts.append(char.to_prompt())
+            _persona_text = char.to_prompt()
+            # 认知模式（角色扮演 / 驻留智能体）：紧跟在人格描述之后注入。
+            # roleplay（默认）时 apply_cognition 严格无操作，线上行为不变；
+            # 这里炸掉绝不能把整轮对话带走 —— 任何异常都降级成原人设。
+            try:
+                from characters.cognition import apply_cognition
+                _persona_text = apply_cognition(_persona_text, char)
+            except Exception as _cog_err:
+                logger.warning(f"[认知模式] 注入失败，已降级为原人设: {_cog_err}")
+            # 人格深度层：2 万字级的长文说明书（身份/说话方式/情绪/关系/日常/习惯/红线/示例）。
+            # 开关 QIYU_DEEP_PERSONA=0 可整体关；任何异常都只丢这一层，不影响对话。
+            try:
+                from companion.persona_deep import render as _render_deep_persona
+                _deep_text = _render_deep_persona(char)
+                if _deep_text:
+                    _persona_text = _persona_text + "\n\n" + _deep_text
+            except Exception as _dp_err:
+                logger.warning(f"[人格深度] 注入失败，已跳过: {_dp_err}")
+            system_parts.append(_persona_text)
+            _mbti_block = build_mbti_voice_block(char)
+            if _mbti_block:
+                system_parts.append(_mbti_block)
         else:
-            system_parts.append("你是一个AI助手。")
+            system_parts.append("你是一个普通人，正在跟朋友发微信。")
         # 用户向（男/女）与关系定位基线
         try:
             _gender_block = _user_gender_block(char)
@@ -335,7 +493,7 @@ class LLMClient(MainBrainProvider):
         # 注入 RAG 知识
         if use_rag and route_result.needs_rag:
             kb = get_knowledge_base()
-            knowledge_ctx = kb.get_knowledge_context(user_input)
+            knowledge_ctx = kb.get_knowledge_context(user_input, char_id=char_id)  # 按角色隔离，别的角色简历不串进来
             if knowledge_ctx:
                 system_parts.append(f"\n{knowledge_ctx}")
 
@@ -414,11 +572,32 @@ class LLMClient(MainBrainProvider):
                 system_parts.append("\n" + _eg)
         except Exception:
             pass
+        # 睡眠状态硬约束：她说了晚安后，绝不能再出现"在呢/还没睡"（修左右脑互搏）
+        try:
+            from companion.sleep import sleep_prompt_block
+            _sb = sleep_prompt_block(user_id, char_id) if (user_id and char_id) else ""
+            if _sb:
+                system_parts.append("\n" + _sb)
+        except Exception:
+            pass
 
         final_reminder = (
             "\n\n【最后提醒（必须遵守）】只输出 JSON（包含 conversation_state 和 messages），不要输出任何其他内容、"
-            "不要解释、不要 Markdown 代码块；消息要像真人随手发的微信。"
+            "不要解释、不要 Markdown 代码块；消息要像真人随手发的微信：普通聊天 1~3 条、每条不超过 15 个字"
+            "（多数 2~6 个字）；用户明确要长内容时按长文模式：1~4 条、每条不超过 80 字（第一条可以短）、总量 150~400 字；"
+            "不要总结、不要列点、不要重复上一句或复述对方的话；"
+            "用第一人称「我」；你是真人不是助手/产品，不要客服腔、不要自我介绍成 AI/模型/助手；"
+            "语气词按你的 MBTI 口癖来，不套统一清单；"
+            "被问身份先反问一句，别报简历。"
         )
+        _mb_prof = mbti_profile(char) if char else {}
+        if _mb_prof:
+            _energy_hint = "E 型可以有 2~3 条短句" if _mb_prof.get("energy") == "E" else "I 型多数 1 条，不硬凑"
+            final_reminder += (
+                f"\n【本轮 MBTI 口癖】你是 {_mb_prof['mbti']}：至少自然出现一个这些口癖："
+                f"{_mb_prof['fillers']}；{_mb_prof['bubble_plan']}；{_mb_prof['first_move']}；"
+                f"{_mb_prof['close']}；不要用其他类型的固定口癖。"
+            )
         # 易变块（当前时间）统一压到最后：保证前面的人设/红线/角色卡是最长稳定前缀
         try:
             system_parts.append(_current_time_block())
@@ -436,12 +615,20 @@ class LLMClient(MainBrainProvider):
             pass
         return ""
 
-    async def chat(self, char_id: str, messages: list, temperature: float = 0.7,
+    async def chat(self, char_id: str, messages: list, temperature: float = 0.0,
                    user_id: str = "", use_memory: bool = True, use_rag: bool = True,
                    channel=None, pending_messages: list | None = None) -> str:
-        """生成回复，自动注入记忆和知识；pending_messages=§15 连续多条用户消息批次。"""
+        """生成回复，自动注入记忆和知识；pending_messages=§15 连续多条用户消息批次。
+
+        temperature 默认 0.0（= 交给 resolve_chat_temperature 决定）：
+        显式请求温度 > 角色卡温度 > 设置页 default_temperature > 0.7。
+        """
+        if not self.available:
+            # 本地中枢可能启动晚于客户端，或 /models 不可用：对话前再探一次，别直接把用户挡在 503
+            await asyncio.to_thread(self._check_llm)
         if not self.available:
             raise HTTPException(503, "LLM 服务未配置或不可用，请检查设置中的 API 地址和模型名称。")
+        temperature = resolve_chat_temperature(char_id, temperature)
         system_msg = await self._build_chat_system_msg(char_id, messages, user_id, use_memory, use_rag, channel, pending_messages)
         from runtime.perf import perf_monitor
         with perf_monitor.time("llm_ttft", char=char_id):
@@ -451,7 +638,7 @@ class LLMClient(MainBrainProvider):
             if m.get("role") == "user":
                 user_content = _msg_text(m.get("content", ""))
                 break
-        reply, pieces = _finalize_chat_reply(user_id, raw, user_content, char_id)
+        reply, pieces = _finalize_chat_reply(user_id, raw, user_content, char_id, messages)
         if not reply:
             # 空正文兜底：思考预算耗尽/空回包 → 关思考显式重拉一次；仍空回诚实兜底句，绝不回"……"
             try:
@@ -459,7 +646,7 @@ class LLMClient(MainBrainProvider):
                     system_msg,
                     [{"role": "user", "content": user_content or "（继续刚才的对话，正常回复我）"}],
                     temperature, no_thinking=True)
-                reply, pieces = _finalize_chat_reply(user_id, retry_raw, user_content, char_id)
+                reply, pieces = _finalize_chat_reply(user_id, retry_raw, user_content, char_id, messages)
             except Exception as e:
                 logger.warning(f"[LLM] 空正文兜底重试失败: {e}")
         if not reply:
@@ -468,6 +655,8 @@ class LLMClient(MainBrainProvider):
             _u = (user_content or "").strip()
             if _u in ("在吗", "在不在", "在么", "人呢", "喂", "哈喽", "hi", "hello", "嗨"):
                 reply = "在呢"
+            elif any(k in _u for k in ("难受", "难过", "不开心", "烦", "累", "哭", "委屈", "生气")):
+                reply = "咋了"
             elif _u.endswith(("？", "?")) or _u.startswith(("为什么", "怎么", "啥", "什么")):
                 reply = "刚卡了一下 你再说一遍"
             else:
@@ -475,12 +664,19 @@ class LLMClient(MainBrainProvider):
             pieces = [{"text": reply, "type": "statement", "delay": 0}]
         return reply, pieces
 
-    async def chat_stream(self, char_id: str, messages: list, temperature: float = 0.7,
+    async def chat_stream(self, char_id: str, messages: list, temperature: float = 0.0,
                           user_id: str = "", use_memory: bool = True, use_rag: bool = True,
                           channel=None, pending_messages: list | None = None):
-        """流式生成回复：yield (reasoning_delta, content_delta)；pending_messages=§15 批次。"""
+        """流式生成回复：yield (reasoning_delta, content_delta)；pending_messages=§15 批次。
+
+        temperature 默认 0.0（= 交给 resolve_chat_temperature 决定），优先级同 chat()。
+        """
+        if not self.available:
+            # 同上：流式对话前再探一次，避免本地中枢刚启动时被误判
+            await asyncio.to_thread(self._check_llm)
         if not self.available:
             raise HTTPException(503, "LLM 服务未配置或不可用，请检查设置中的 API 地址和模型名称。")
+        temperature = resolve_chat_temperature(char_id, temperature)
         system_msg = await self._build_chat_system_msg(char_id, messages, user_id, use_memory, use_rag, channel, pending_messages)
         async for reasoning, content in self._call_real_llm_stream(system_msg, messages, temperature):
             yield reasoning, content
@@ -511,7 +707,19 @@ class LLMClient(MainBrainProvider):
         # 模型判断此刻没话可说：输出空 messages 列表 = 不发
         if re.search(r'"messages"\s*:\s*\[\s*\]', raw or ""):
             return []
-        return parse_chat_messages(raw)["messages"]
+        msgs = parse_chat_messages(raw)["messages"]
+        # 代码层兜底：主动消息不许用「醒着吗/干嘛呢/在吗」这种万能开场
+        generic = ("醒着吗", "醒着呢", "还没睡", "在吗", "忙啥呢", "干嘛呢", "干啥呢")
+        cleaned = []
+        for m in msgs:
+            t = str(m.get("text") or "").strip()
+            for op in generic:
+                if t == op or t.startswith(op + "？") or t.startswith(op + "?") or t.startswith(op + "，"):
+                    t = t[len(op):].lstrip("？?，, ")
+                    break
+            if t:
+                cleaned.append({**m, "text": t})
+        return cleaned
 
     async def generate_story_check(self, char_id: str, user_id: str, context: str = "") -> list:
         """讲故事/长内容后对方半天没回：最多一句轻唤（喂？/睡着了？），不发第二句、不继续讲。"""
@@ -572,7 +780,7 @@ class LLMClient(MainBrainProvider):
             user_prompt = (
                 f"[系统] 你刚才说要去查/看看，现在查完了，但没查到可用结果（链接打不开、内容要登录、或搜索为空）。\n"
                 f"【查的内容】{query}\n"
-                "像真人一样如实告诉对方：没查到/打不开/要不你自己看看，不要编结果，不要假装已发送，1~2 条短消息。"
+                "像真人一样如实告诉对方：没查到/打不开/要不你自己看看，不要编结果，不要假装已发送，1~3 条短消息。"
             )
         elif auto:
             user_prompt = (
@@ -631,6 +839,13 @@ class LLMClient(MainBrainProvider):
         """主动消息（追问/每日展开/到点提醒/联网查证）的独立系统提示词：人设 + 当前关系 + 记忆 + 今日热门"""
         char = char_mgr.get_character(char_id)
         persona = char.to_prompt() if char else ""
+        # 认知模式同样作用于主动消息（追问/每日展开/到点提醒）：驻留模式下她也知道自己住在这台机器里，
+        # 但语气不带助手腔。roleplay 时无操作；失败降级成原人设，不影响主动消息。
+        try:
+            from characters.cognition import apply_cognition
+            persona = apply_cognition(persona, char)
+        except Exception as _cog_err:
+            logger.warning(f"[认知模式] 主动消息注入失败，已降级为原人设: {_cog_err}")
         rel = _relation_block(user_id, char_id)
         memory_ctx = ""
         if user_id:
@@ -653,11 +868,12 @@ class LLMClient(MainBrainProvider):
             pass
         base += (
             "【主动消息铁律】这条消息是你主动发起的，更要像真人微信：\n"
-            "- 最多 1~2 条短句，绝大多数时候 1 条就够；直接说事，不叠语气词，不编卖萌梗，不用感叹号连发，emoji 最多一个。\n"
+            "- 最多 1~2 条短句，绝大多数时候 1 条就够；直接说事，语气词自然一个就好，不编卖萌梗，不用感叹号连发，emoji 最多一个。\n"
             "- 禁止任何环境描写/文艺铺垫/场景渲染开场（例如\"阳光移到书桌上了，我随手翻了会儿书\"\"刚给龟背竹浇完水\""
             "\"新叶子看着真让人静心\"这类直接删掉）。真人不会用这种话开场。\n"
             "- 禁止\"慢慢说\"\"我在听\"\"我在这陪你\"这类安抚式/客服式收尾。\n"
-            "- 开场大白话优先：想找人就\"醒着吗\"\"忙啥呢\"；有事说事；没事就不发。\n"
+            "- 不要用「醒着吗/醒着呢/还没睡/在吗/忙啥呢」开头；直接从具体的事/具体的话开始。\n"
+            "- 优先从你的职业、爱好、今天发生的小事找话题；热点只是备选，别每次都发同一个热点。\n"
             "- 如果此刻没有任何自然想说的，就输出 \"messages\": []（空列表 = 不发）。宁可空着也别硬凑。\n"
             "- 对方没回就算了，不要追着再问。\n"
         )
@@ -699,7 +915,7 @@ class LLMClient(MainBrainProvider):
             try:
                 _rag_q = ((_conv_state(user_id, char_id).get("last_topic") or "").strip()[:80]) or (context or "")
                 if _rag_q:
-                    _kctx = kb.get_knowledge_context(_rag_q)
+                    _kctx = kb.get_knowledge_context(_rag_q, char_id=char_id)
                     if _kctx:
                         base += f"\n【知识库（内部，知道就行，别整段背诵）】\n{_kctx}\n"
             except Exception:
@@ -733,7 +949,7 @@ class LLMClient(MainBrainProvider):
                 f"开头不要'提醒你一下'这种机械说法，直接顺着记忆自然带出就行。"
                 f"如果你的人设偏冒失、或者这件事本身不太重要、或者你确实'好像才想起来'，可以自然带上一点"
                 f"'是不是提醒晚了，没耽误事吧'式的语气（但不要每句都解释，短促自然）。"
-                f"不要客服腔，不要长篇，1~2 条短消息即可。\n"
+                f"不要客服腔，不要长篇，1~3 条短消息即可。\n"
                 f"【要提醒的事】{context or '（自己从记忆里找，别瞎编）'}\n"
             )
         elif kind == "webcheck":
@@ -802,19 +1018,27 @@ class LLMClient(MainBrainProvider):
         url = (url or LLM_URL).rstrip("/")
         model = model or LLM_MODEL
         headers = {"Content-Type": "application/json"}
+        if not api_key:
+            # 兜底：调用方未传 api_key 时从运行时设置读取（需要鉴权的端点）
+            try:
+                api_key = str(load_runtime_settings().get("api_key") or "")
+            except Exception:
+                api_key = ""
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         payload = {
             "model": model,
-            "messages": [{"role": "system", "content": system_msg}] + messages,
+            "messages": _with_system(system_msg, messages, model),
             "temperature": temperature,
-            "max_tokens": 6000,
+            "max_tokens": (6000 if _is_longform_request(self._last_user_text(messages), messages) else (800 if str(model or "").lower().startswith("wb-") else 300)),
         }
         if no_thinking:
             payload["chat_template_kwargs"] = {"enable_thinking": False}
         else:
-            _apply_thinking_kwargs(payload, _last_user_text(messages))
-        
+            _apply_thinking_kwargs(payload, self._last_user_text(messages))
+        # 云端 API 不认本地扩展字段：发之前就摘掉，避免先 400 再重发
+        _strip_local_only_kwargs(payload, url)
+
         async with httpx.AsyncClient(timeout=180) as client:
             resp = await client.post(f"{url}/chat/completions", json=payload, headers=headers)
             if resp.status_code == 400 and "chat_template_kwargs" in payload:
@@ -822,7 +1046,7 @@ class LLMClient(MainBrainProvider):
                 resp = await client.post(f"{url}/chat/completions", json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
-            msg = data["choices"][0].get("message", {})
+            msg = (data.get("choices") or [{}])[0].get("message", {})
             content = (msg.get("content") or "").strip()
             thinking_on = bool((payload.get("chat_template_kwargs") or {}).get("enable_thinking") in (True, "true", "True", 1))
             # 严格分离：最终回复只认 content；reasoning_content 仅作思考过程，绝不顶替正片
@@ -849,21 +1073,32 @@ class LLMClient(MainBrainProvider):
         url = (url or LLM_URL).rstrip("/")
         model = model or LLM_MODEL
         headers = {"Content-Type": "application/json"}
+        if not api_key:
+            # 兜底：调用方未传 api_key 时从运行时设置读取（需要鉴权的端点）
+            try:
+                api_key = str(load_runtime_settings().get("api_key") or "")
+            except Exception:
+                api_key = ""
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         payload = {
             "model": model,
-            "messages": [{"role": "system", "content": system_msg}] + messages,
+            "messages": _with_system(system_msg, messages, model),
             "temperature": temperature,
-            "max_tokens": 6000,
+            "max_tokens": (6000 if _is_longform_request(self._last_user_text(messages), messages) else (800 if str(model or "").lower().startswith("wb-") else 300)),
             "stream": True,
         }
-        _apply_thinking_kwargs(payload, _last_user_text(messages))
+        _apply_thinking_kwargs(payload, self._last_user_text(messages))
         thinking_on = bool((payload.get("chat_template_kwargs") or {}).get("enable_thinking") in (True, "true", "True", 1))
         # 计时诊断：首字延迟 + 整轮耗时 + 思考开关（排查"回得慢/是不是重复等待"用）
         _t0 = time.time()
         _ttft = [0.0]
-        async with httpx.AsyncClient(timeout=420) as client:
+        # 数据间隔超时：整轮 timeout=420 改成「两次数据之间」的间隔超时，
+        # 主模型 60s 没吐字就断开（QIYU_MAIN_LLM_TIMEOUT 可调），长回复不会被误杀。
+        _gap = _stream_gap_timeout(url)
+        # 云端 API 不认本地扩展字段：发之前就摘掉，避免先 400 再重发
+        _strip_local_only_kwargs(payload, url)
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10.0, read=_gap, write=30.0, pool=10.0)) as client:
             for _attempt in range(3):
                 try:
                     seen_reasoning = ""
@@ -880,7 +1115,7 @@ class LLMClient(MainBrainProvider):
                                 obj = json.loads(data)
                             except Exception:
                                 continue
-                            delta = obj.get("choices", [{}])[0].get("delta", {}) or {}
+                            delta = (obj.get("choices") or [{}])[0].get("delta", {}) or {}
                             reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
                             content = delta.get("content") or ""
                             if reasoning:
@@ -917,15 +1152,20 @@ class LLMClient(MainBrainProvider):
         if not self.available and not LLM_ROUTE_URL:
             raise HTTPException(503, "LLM 服务未配置或不可用")
         prompt = build_resume_prompt(tags, name, description, mbti, persona_params, user_gender, relationship_role)
+        used = getattr(self, "_persona_used_names", [])
+        if used and not name:
+            prompt += ("\n\n【已用姓名】" + "、".join(used[-20:]) +
+                       "。这次必须换一个完全不同、常见的真实姓名，不要复用上面的名字。")
         route_url, route_model, headers = _route_llm_info()
         payload = {
             "model": route_model,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.85,
-            "max_tokens": 115200,
+            "temperature": 0.95,
+            "max_tokens": 6000,
         }
         _apply_thinking_kwargs(payload)
-        
+        _strip_local_only_kwargs(payload, route_url)
+
         try:
             async with httpx.AsyncClient(timeout=300) as client:
                 resp = await client.post(f"{route_url}/chat/completions", json=payload, headers=headers)
@@ -940,12 +1180,15 @@ class LLMClient(MainBrainProvider):
             raise Exception(f"路由模型调用失败 ({type(e).__name__}): {e or '无详细信息'}") from e
         content = ""
         try:
-            content = data.get("choices", [{}])[0].get("message", {}).get("content") or ""
+            content = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
         except Exception:
             content = ""
         if not content.strip():
-            reason = data.get("choices", [{}])[0].get("finish_reason", "unknown")
+            reason = (data.get("choices") or [{}])[0].get("finish_reason", "unknown")
             raise Exception(f"路由模型返回了空内容（finish_reason={reason}）。该模型可能是推理模型，思考消耗了全部输出额度，请降低生成并发或换用非推理模型作为路由模型。")
+        m = re.search(r"【基本信息】[^\n]*?姓名=([^ |\n]+)", content)
+        if m:
+            self._persona_used_names = (getattr(self, "_persona_used_names", []) + [m.group(1).strip()])[-30:]
         return content
 
     async def generate_character_card_stream(self, tags: list, name: str = "", description: str = "",
@@ -955,15 +1198,21 @@ class LLMClient(MainBrainProvider):
         if not self.available and not LLM_ROUTE_URL:
             raise HTTPException(503, "LLM 服务未配置或不可用")
         prompt = build_resume_prompt(tags, name, description, mbti, persona_params, user_gender, relationship_role)
+        used = getattr(self, "_persona_used_names", [])
+        if used and not name:
+            prompt += ("\n\n【已用姓名】" + "、".join(used[-20:]) +
+                       "。这次必须换一个完全不同、常见的真实姓名，不要复用上面的名字。")
         route_url, route_model, headers = _route_llm_info()
         payload = {
             "model": route_model,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.85,
-            "max_tokens": 115200,
+            "temperature": 0.95,
+            "max_tokens": 6000,
             "stream": True,
         }
         _apply_thinking_kwargs(payload)
+        _strip_local_only_kwargs(payload, route_url)
+        _buf = []
         try:
             async with httpx.AsyncClient(timeout=600) as client:
                 async with client.stream("POST", f"{route_url}/chat/completions", json=payload, headers=headers) as resp:
@@ -980,14 +1229,18 @@ class LLMClient(MainBrainProvider):
                             obj = json.loads(data)
                         except Exception:
                             continue
-                        delta = obj.get("choices", [{}])[0].get("delta", {}) or {}
+                        delta = (obj.get("choices") or [{}])[0].get("delta", {}) or {}
                         content = delta.get("content") or ""
                         reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
                         if reasoning:
                             yield {"type": "reasoning", "text": reasoning}
                         if content:
+                            _buf.append(content)
                             yield {"type": "content", "text": content}
                         yield {"type": "raw", "data": json.dumps(obj, ensure_ascii=False)}
+            m = re.search(r"【基本信息】[^\n]*?姓名=([^ |\n]+)", "".join(_buf))
+            if m:
+                self._persona_used_names = (getattr(self, "_persona_used_names", []) + [m.group(1).strip()])[-30:]
         except Exception as e:
             yield {"type": "error", "message": f"路由模型调用失败 ({type(e).__name__}): {e or '无详细信息'}"}
 

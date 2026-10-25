@@ -246,6 +246,8 @@ class CharacterManager:
         for file_path in CHARACTERS_DIR.glob("*.json"):
             if file_path.name.startswith("_"):
                 continue  # 跳过内部文件
+            if file_path.name == "default.json":
+                continue  # 出厂默认（多角色格式）已在第 1 步加载，这里按单角色读会误报错
             try:
                 char = Character.from_file(str(file_path))
                 if char.id not in self._characters:

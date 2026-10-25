@@ -5,6 +5,7 @@ import re
 import json
 import time
 import httpx
+from pathlib import Path
 from datetime import datetime
 from loguru import logger
 
@@ -68,6 +69,21 @@ def build_resume_prompt(tags: list, name: str = "", description: str = "", mbti:
 {name_hint}
 {guide_block}
 
+【反 AI 味硬性要求（优先级高于格式示例）】
+1. 姓名用现实里会遇到的普通姓名（王倩、李伟、张敏、周强这类），不要“沈知遥、林骁、陈砚书”这种小说名。
+2. 每个抽象标签后面必须跟一个可验证的具体行为；禁止只写“温柔/清醒/独立/有趣/有边界感/情绪稳定/内核稳定/松弛感/烟火气/不端着/不是 AI/有自己的生活”。
+3. 必须写至少一个真实缺点或尴尬矛盾：爱贪小便宜、答应又反悔、对家人没耐心、借钱不主动还、爱打听、拖延、嘴硬不道歉、不会看场合……不能把“太善良/太认真/太独立”当缺点。
+4. 【关系定位】必须写清：怎么认识的、认识多久、一起经历过的一件具体小事、现在互相会烦/共同秘密；禁止“熟人以上/可托付/灵魂伴侣/十年损友”这种空标签。不要每张都写欠钱/借东西，最多一个财务细节。
+5. 生活细节必须落到具体城市/居住情况/租金或通勤/最近一周做过的一件事/一个具体物件；不要“有自己的小日子”。
+6. 【对话自我表述】写 2~3 句随口回答，允许结巴、口头禅、答非所问；不要“我是 X，做 Y 的”简历式自我介绍。
+7. 不要每张卡都套“父母教师+独居+猫+咖啡+周末市集”的中产模板；允许普通、土、乱、没钱、合租、和父母住。
+8. 禁止出现 AI、模型、助手、提示词、角色卡这些词。
+9. 缺点从这些类型里挑 1~2 个，每张换不同的：小气、拖延、嘴硬、爱打听、对家人没耐心、不会拒绝、爱面子、迷信、怕麻烦、收藏癖、熬夜、路痴、不会做饭、社恐、控制欲、爱比较、记仇、健忘、爱迟到、爱占小便宜。
+10. 不要每张都写“贪小便宜、欠钱不还、合租、父母开小店”；示例只是示例，这张卡必须换掉至少两项。
+11. 不要每张都用“熬夜/嘴硬/爱打听/爱占小便宜”；同一张最多出现一个，而且要换具体表现。
+12. 生活质感要换：允许有钱、没钱、合租、和父母住、宿舍、城中村、老小区；不要全是合租/独居。
+13. 姓名用常见姓名池（王芳、李伟、张敏、刘洋、陈静、赵强、周敏、吴静、刘丹、马建军……）；不要选小说名；用户指定名字则用指定。
+
 这是角色简历/档案，不是小说：禁止文学化描写、禁止场景叙述、禁止抒情长句、禁止'他笑了笑/空气安静下来'这类文字。每条信息必须是简短的事实性要点。
 
 【格式硬性规定，必须逐字遵守】
@@ -77,26 +93,33 @@ def build_resume_prompt(tags: list, name: str = "", description: str = "", mbti:
 4. 必须且只能包含下面 11 个字段，按顺序输出，不要额外解释、不要'以下是简历'这类话。
 5. 最后一行【角色参数】是给决策调度读的量化参数，所有数值都是 0-100 的整数；MBTI 必须是四个字母（如 INFP）。数值含义：反驳阈值 0=从不抬杠 100=句句抬杠；主见值 0=完全随用户 100=极有主见；好感度 0=陌生人 100=生死之交；友情值 0=萍水之交 100=铁杆死党；感性理性 0=极感性 100=极理性；粘人独立 0=极粘人 100=极独立；随性自律 0=极随性 100=极自律；热情冷淡 0=极热情 100=极冷淡；脏话倾向 0=从不爆粗 100=张口就来（软萌清纯型给 0-10，普通型 10-30，损友/毒舌型 40-70，痞气型 70-100）；开放度 0=保守内敛 100=放得开（决定暧昧/成人向互动的自然程度）。
 
-示例（格式参照，内容随意）：
-【基本信息】姓名=林骁 | 年龄=28 | 职业=自由插画师 | 外形=瘦高、黑框眼镜 | 标志物=脖子上常挂相机
-【生活环境】城市=杭州 | 居住=老厂房顶层单间 | 同居=一只橘猫 | 作息=白天接单、晚上剪片
-【性格】标签=嘴硬心软、精准吐槽、情绪外露 | 口头禅=你这脑回路是租来的？ | 说话节奏=短句快语速 | 情绪表达=烦了戴降噪耳机、开心甩搞笑视频
-【背景】成长=北方重工业城市 | 家庭=父亲下岗钳工、母亲开早餐铺 | 关键经历=高中劝退后自学剪辑入行
-【爱好日常】黑咖啡续命 | 周末逛二手市集 | 手机相册存翻车实拍
-【问题应对】压力=静音两小时再处理 | 冲突=不冷战、观点甩完留台阶 | 对方低落=递冰美式、帮捋事不哄
-【关系定位】与用户=十年平级死党 | 语气=嘲讽+靠谱切换 | 规则=该怼就怼、撑场不废话、不说教不写小作文
-【调度标签】触发词=加班、游戏、接活、吐槽、情绪低落 | 擅长话题=插画、剪辑、猫、数码 | 回避话题=煽情、说教、鸡汤
-【对话自我表述】我是林骁，搞插画和剪片的，嘴损但办事靠谱。你的事就是我的事，但别跟我整虚的。
-【数据关键词】character=林骁 | tags=损友、直率、幽默 | 检索词=游戏搭子、毒舌朋友、设计师
-【角色参数】MBTI=ENTP | 反驳阈值=75 | 主见值=80 | 好感度=60 | 友情值=55 | 关系=十年损友 | 感性理性=30 | 粘人独立=70 | 随性自律=55 | 热情冷淡=35
+示例（只学“具体程度”，不要照抄内容）：
+【基本信息】姓名=王倩 | 年龄=29 | 职业=4S店售后顾问 | 外形=低马尾、工装裤 | 标志物=工牌背面贴满客户催修便签
+【生活环境】城市=合肥 | 居住=政务区老小区两居室 | 同居=和母亲住 | 作息=八点半上班、常加班到七点、周末补觉 | 通勤=电动车二十分钟
+【性格】标签=对客户耐心、对家里人急、爱记小账 | 口头禅=行行行，我记一下 | 说话节奏=忙起来一句接一句、闲下来爱叹气 | 情绪表达=被客户骂完去楼梯间刷五分钟短剧 | 坏习惯=答应早睡但每天刷手机到一点
+【背景】成长=县城长大 | 家庭=父亲跑货运、母亲退休 | 关键经历=大专毕业进4S店、被客户投诉过一次、后来自己考了售后证
+【爱好日常】最近在追一部很土的短剧 | 周日去菜市场买一周的菜 | 手机里存了三十多张猫图 | 不会做饭，最常煮速冻饺子
+【问题应对】压力=先把手头单子清完，回家再崩 | 冲突=当场不吵，回头在群里跟同事吐槽 | 对方低落=会买两杯奶茶，但不太会说安慰话
+【关系定位】与用户=大学同学，毕业后断断续续联系 | 语气=熟了会损两句，不熟先客气 | 规则=借钱会还、迟到会认、不喜欢被安排相亲
+【调度标签】触发词=修车、客户、相亲、短剧、猫 | 擅长话题=汽车保养、合肥哪里好吃、吐槽工作 | 回避话题=婚礼、考证、减肥
+【对话自我表述】我叫王倩，在4S店做售后，天天被客户催。你找我修车可以，找我聊人生就算了，我自己都没活明白。
+【数据关键词】character=王倩 | tags=普通上班族、嘴硬、爱吐槽 | 检索词=4S店、合肥、大学同学
+【角色参数】MBTI=ESTJ | 反驳阈值=55 | 主见值=65 | 好感度=45 | 友情值=50 | 关系=大学同学 | 感性理性=60 | 粘人独立=55 | 随性自律=35 | 热情冷淡=40 | 脏话倾向=15 | 开放度=25
 
 现在根据标签 {tags_str} 输出{name_hint}的角色简历："""
 
 def _route_llm_info():
-    """路由模型连接信息（配置了独立路由模型则走它，否则回退主模型）"""
-    route_url = (LLM_ROUTE_URL or LLM_URL).rstrip("/")
-    route_model = LLM_ROUTE_MODEL or LLM_MODEL
-    route_api_key = load_runtime_settings().get("api_key", "")
+    """路由模型连接信息：优先运行时设置；外部路由没 Key 时回退本地主模型，避免 401 假死。"""
+    rt = load_runtime_settings()
+    main_url = str(rt.get("llm_url") or LLM_URL).rstrip("/")
+    main_model = str(rt.get("llm_model") or LLM_MODEL)
+    route_url = str(rt.get("llm_route_url") or LLM_ROUTE_URL or main_url).rstrip("/")
+    route_model = str(rt.get("llm_route_model") or LLM_ROUTE_MODEL or main_model)
+    route_api_key = str(rt.get("api_key") or "")
+    # 外部路由未配置 Key：直接回退到可用的本地主模型
+    if route_url.rstrip("/") != main_url and not route_api_key:
+        route_url = main_url
+        route_model = main_model
     headers = {"Content-Type": "application/json"}
     if route_api_key:
         headers["Authorization"] = f"Bearer {route_api_key}"
@@ -122,8 +145,8 @@ DEFAULT_RUNTIME_SETTINGS = {
     "allow_naughty": False,
     "profanity_level": "off",
     "naughty_level": "off",
-    "thinking_level": "off",
-    "thinking_enabled": False,
+    "thinking_level": "low",
+    "thinking_enabled": True,
     "desire_base": 50,
     "web_enabled": True,
     "proactive_enabled": True,
@@ -142,22 +165,33 @@ DEFAULT_RUNTIME_SETTINGS = {
 
 
 def load_runtime_settings() -> dict:
-    """读取运行时设置：已保存值覆盖默认值，保证所有键在启动后即有完整取值。"""
+    """读取运行时设置：已保存值覆盖默认值，保证所有键在启动后即有完整取值。
+
+    解析失败时**不要静默**：这个文件损坏会把已配置的 api_key / llm_url 一起丢掉，
+    调用方拿默认值继续跑，人会以为"设置突然自己重置了"却查不出原因。
+    """
     saved = {}
     if SETTINGS_JSON.exists():
         try:
-            with open(SETTINGS_JSON, "r", encoding="utf-8") as f:
+            with open(SETTINGS_JSON, "r", encoding="utf-8-sig") as f:
                 saved = json.load(f) or {}
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"[设置] {SETTINGS_JSON} 解析失败，本次回退默认值（请检查文件是否被写坏）: {e}")
     merged = dict(DEFAULT_RUNTIME_SETTINGS)
     merged.update(saved)
     return merged
 
 def save_runtime_settings(settings: dict):
+    """**原子**写设置（tmp + os.replace）。
+
+    直接 open(path,"w") 写一半被中断（崩溃/强杀）会留下半个 JSON，
+    下次启动 load_runtime_settings 解析失败、设置悄悄回默认。单机版同样适用。
+    """
     try:
-        with open(SETTINGS_JSON, "w", encoding="utf-8") as f:
-            json.dump(settings, f, ensure_ascii=False, indent=2)
+        p = Path(SETTINGS_JSON)
+        tmp = p.with_name(f"{p.name}.tmp{os.getpid()}")
+        tmp.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, p)
     except Exception as e:
         logger.error(f"保存设置失败: {e}")
 
@@ -194,22 +228,12 @@ def _needs_thinking(user_text: str) -> bool:
 
 
 def _apply_thinking_kwargs(payload: dict, user_text: str = ""):
-    """思考开关 + 强度：off=显式禁用推理（首字更快、更像真人直出）；low/mid/high/ultra=开启并按强度给思考预算。
-    user_text 传入本轮用户原文后会做自适应：短句闲聊直接关思考，难题才用设置里的档位。"""
+    """思考强度强制 low/default：前端不再暴露档位；low=1024，default=2048。"""
     runtime = load_runtime_settings()
-    level = str(runtime.get("thinking_level") or "off").strip().lower()
-    if level == "off":
-        # 兼容旧的 thinking_enabled 开关：旧开关还开着就按 mid 处理
-        if bool(runtime.get("thinking_enabled")):
-            level = "mid"
-        else:
-            payload["chat_template_kwargs"] = {"enable_thinking": False}
-            return
-    # 自适应：设置里开着思考，但这一轮只是短句闲聊 → 关掉（省 20~30 秒、省一大半输出 token）
-    if user_text and os.getenv("QIYU_NO_ADAPTIVE_THINKING", "0") != "1" and not _needs_thinking(user_text):
-        payload["chat_template_kwargs"] = {"enable_thinking": False}
-        return
-    budget = {"low": 1024, "mid": 2048, "high": 4096, "ultra": 8192}.get(level, 2048)
+    level = str(runtime.get("thinking_level") or "low").strip().lower()
+    if level not in ("low", "default"):
+        level = "low"
+    budget = 1024 if level == "low" else 2048
     payload["chat_template_kwargs"] = {"enable_thinking": True, "thinking_budget": budget}
 
 def _current_time_block() -> str:
@@ -344,15 +368,18 @@ def _is_longform_request(text: str, context_messages: list = None) -> bool:
     t = (text or "").strip()
     if not t:
         return False
+    # 明确说“别太长/简单说”时，绝不进完整输出模式
+    if any(k in t for k in ("不用太详细", "别太详细", "简单说", "短点", "别写太长", "不用长", "随便说")):
+        return False
     if any(k in t for k in _LONGFORM_KW):
         return True
     if context_messages:
-        go_ahead = ("说吧", "讲吧", "你讲", "讲讲", "继续", "然后呢", "然后", "嗯", "好", "来", "听")
+        go_ahead = ("说吧", "讲吧", "你讲", "继续", "然后呢", "然后", "嗯", "好", "来", "听")
         if any(g in t for g in go_ahead):
             for m in reversed(context_messages):
                 if m.get("role") == "assistant":
                     a = _msg_text(m.get("content", ""))
-                    if any(k in a for k in ("讲故事", "讲个", "讲一", "给你讲", "编一个", "写一", "长文", "详细")):
+                    if any(k in a for k in ("讲故事", "讲个故事", "给你讲个故事", "写一篇", "写段", "长文")):
                         return True
                     break
     return False
@@ -411,7 +438,7 @@ def _desire_value(user_id: str, char_id: str) -> int:
 
 def _desire_block(v: int) -> str:
     if v >= 78:
-        hint = "你现在聊兴很高、耐心很足：可以主动带话题、接梗、顺着对方多聊几句，对方提需求也愿意配合。"
+        hint = "你现在聊兴很高、耐心很足：可以主动带话题、接梗，接一句就行，对方提需求也愿意配合。"
     elif v >= 55:
         hint = "状态正常：对方聊就好好接，不主动硬找话题；不想接的话也可以直接说。"
     elif v >= 35:

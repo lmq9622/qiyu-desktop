@@ -20,15 +20,12 @@ from companion.settings import _desire_value, _investment_value, _is_longform_re
 from companion.relations import _apply_relation_delta, _cancel_nudge, _register_schedule, _reminder_due_time
 from companion.conv import _compute_scene, _conv_state, _interaction_need_value, _save_conv_store, _update_conv_state
 from companion.emotions import _apply_emotion_delta
+from companion.mbti_voice import mbti_profile
 
 def _msg_cap(state: str, longform: bool = False) -> int:
-    """真人消息条数上限：普通 3 条内；兴奋/吐槽/吵架可连发但最多 5；认真讨论/技术协作 6；长文不限。"""
+    """真人消息条数上限：普通/情绪都最多 3 条；长文 1~4 条长气泡。"""
     if longform:
-        return 100
-    if state in ("兴奋", "吐槽", "吵架"):
-        return 5
-    if state in ("认真讨论", "技术协作"):
-        return 6
+        return 4
     return 3
 
 def _looks_leaked_json(text: str) -> bool:
@@ -79,6 +76,11 @@ def _sanitize_msg_text(text: str, search_pending: bool, allow_exclaim: bool = Fa
     t = (text or "").strip()
     if not t:
         return None
+    t = t.rstrip("，,、;；").strip()
+    # 固定口癖清理：用户明确不要「哟/耶」这种统一开场
+    t = re.sub(r"^[哟耶][，,、\s]*", "", t).strip()
+    if not t:
+        return None
     if _looks_leaked_json(t):
         return None
     if search_pending or search_requested:
@@ -94,6 +96,129 @@ def _sanitize_msg_text(text: str, search_pending: bool, allow_exclaim: bool = Fa
     else:
         t = re.sub(r"！{2,}", "！", t)
     return t
+
+def _shorten_bubbles(msgs: list, max_len: int = 15, max_count: int = 3) -> list:
+    """硬护栏：普通聊天每条 ≤15 字、最多 3 条（长文模式不走这里）。"""
+    def _trim(t: str) -> str:
+        t = (t or "").strip()
+        while t and t[-1] in "，,、;；":
+            t = t[:-1].rstrip()
+        return t
+
+    out = []
+    for m in msgs:
+        t = _trim(m.get("text", ""))
+        if not t:
+            continue
+        # 链接/图片消息不截断，避免把 URL 切碎
+        if "http://" in t or "https://" in t or m.get("image_url"):
+            out.append({**m, "text": t})
+            continue
+        parts = [p for p in re.split(r"(?<=[，。！？、,.!?…])\s*|\s+", t) if p.strip()]
+        for p in parts:
+            p = _trim(p)
+            while len(p) > max_len:
+                cut = max((p.rfind(ch, 0, max_len + 1) for ch in "，。！？、,.!?…"), default=-1)
+                if cut <= 0:
+                    cut = max_len
+                else:
+                    cut += 1
+                seg = _trim(p[:cut])
+                if seg:
+                    out.append({**m, "text": seg})
+                p = _trim(p[cut:])
+            if p:
+                out.append({**m, "text": p})
+    # 连续纯省略号只留一个（真人不会连发两个「…」）
+    dedup = []
+    for m in out:
+        t = m.get("text", "")
+        if t in ("…", "……", "...") and dedup and dedup[-1].get("text") in ("…", "……", "..."):
+            continue
+        dedup.append(m)
+    out = dedup
+    if len(out) > max_count:
+        tail = _trim("".join(x.get("text", "") for x in out[max_count - 1:]))
+        out = out[:max_count - 1] + [{**out[-1], "text": tail[:max_len]}]
+    return out
+
+
+def _anti_template_messages(parsed: dict, context_messages: list = None, user_content: str = "") -> dict:
+    """代码层拆模板：连续用「咋了/怎么了」、短反应+问句两气泡 → 删/换掉。"""
+    msgs = parsed.get("messages") or []
+    if not msgs:
+        return parsed
+    # 身份问题保留「意外反应+反问」的层次，不要压成单字
+    if any(k in (user_content or "") for k in ("你是谁", "认识我吗", "介绍你自己", "是不是AI", "机器人", "ChatGPT")):
+        return parsed
+
+    def _txt(m):
+        return str((m or {}).get("text") or "").strip()
+
+    def _is_q(m):
+        t = _txt(m)
+        return (m or {}).get("type") == "question" or t.endswith(("？", "?"))
+
+    generic = {"咋了", "怎么了", "咋了？", "怎么了？"}
+    # 情绪句不要回万能「咋了」：直接问具体哪里不舒服
+    if len(msgs) == 1 and _txt(msgs[0]) in generic and any(
+            k in (user_content or "") for k in ("难受", "不舒服", "疼")):
+        msgs[0] = {**msgs[0], "text": "哪不舒服"}
+        parsed["messages"] = msgs
+        return parsed
+    prior = "".join(_txt(m) for m in (context_messages or [])[-6:] if m.get("role") == "assistant")
+    changed = True
+    while changed and msgs:
+        changed = False
+        first = _txt(msgs[0])
+        # 「行/好/可以」这种 agent 式开场，后面有正文就删掉
+        if first in ("行", "好", "可以", "行吧", "没问题") and len(msgs) >= 2:
+            msgs.pop(0)
+            changed = True
+            continue
+        # 万能开场 + 任何具体第二句 → 留具体的
+        if first in generic and len(msgs) >= 2:
+            msgs.pop(0)
+            changed = True
+            continue
+        # 短反应 + 追问 → 只删「万能追问」或极短问候里的追问；保留「卧槽|真的假的？」这种真人双气泡
+        if len(msgs) >= 2 and len(first) <= 3 and _is_q(msgs[1]):
+            if _txt(msgs[1]) in generic or (first in ("在", "嗯", "哦") and len((user_content or "").strip()) <= 4):
+                msgs.pop(1)
+                changed = True
+                continue
+        # 单独一个「咋了」且历史已经用过 → 换一个
+        if first in generic and (prior.count("咋了") + prior.count("怎么了")) >= 1:
+            idx = prior.count("咋了") + prior.count("怎么了")
+            msgs[0] = {**msgs[0], "text": ("在", "说", "嗯？", "又怎么了")[idx % 4]}
+    parsed["messages"] = msgs
+    return parsed
+
+
+def _apply_mbti_rhythm(parsed: dict, char_id: str, longform: bool = False) -> dict:
+    """代码层落实 E/I 气泡节奏：E 型更外放，I 型最多 2 条。"""
+    if longform or not char_id:
+        return parsed
+    try:
+        prof = mbti_profile(char_mgr.get_character(char_id))
+    except Exception:
+        return parsed
+    if not prof:
+        return parsed
+    msgs = parsed.get("messages") or []
+    if not msgs:
+        return parsed
+    if prof.get("energy") == "E":
+        if len(msgs) == 1:
+            t = str(msgs[0].get("text") or "").strip()
+            if len(t) >= 10:
+                parts = [p.strip() for p in re.split(r"(?<=[，,、])\s*|\s+", t, maxsplit=1) if p.strip()]
+                if len(parts) == 2:
+                    parsed["messages"] = [{**msgs[0], "text": parts[0]}, {**msgs[0], "text": parts[1]}]
+    elif len(msgs) > 2:
+        parsed["messages"] = msgs[:2]
+    return parsed
+
 
 def _postprocess_reply_messages(user_id: str, char_id: str, parsed: dict,
                                 user_content: str = "", context_messages: list = None) -> dict:
@@ -142,6 +267,9 @@ def _postprocess_reply_messages(user_id: str, char_id: str, parsed: dict,
         parsed["messages"] = []
         return parsed
     cap = _msg_cap(state, longform)
+    has_joke = any((m.get("type") == "joke") for m in kept) or ("笑话" in (user_content or ""))
+    if has_joke and not longform:
+        cap = max(cap, 5)
     if len(kept) > cap:
         kept = kept[:cap]
     # 极简输入/明确拒绝：回得更少（"嗯/哦/行"最多 1 条；"不用了/算了"最多 2 条且别再教育）
@@ -165,16 +293,36 @@ def _postprocess_reply_messages(user_id: str, char_id: str, parsed: dict,
                 out.append(m)
             kept = out
     parsed["messages"] = kept
+    # 补充护栏（服务器版移植）：尾巴残包 / 线下到场幻觉 / 连续重复气泡 / 超长气泡拆分。
+    # 放在这里而不是各调用点，网页流式三处与微信/主动的非流式路径一次全覆盖
+    try:
+        from companion.models import postprocess_reply_messages_extra
+        postprocess_reply_messages_extra(parsed, longform=longform)
+    except Exception as e:
+        logger.warning(f"[后处理] 补充护栏失败，按原回复发出: {e}")
+    # 最后一道硬护栏：普通聊天 1~3 条、每条 ≤15 字（长文模式除外；笑话允许 5 条）
+    if not longform:
+        parsed["messages"] = _shorten_bubbles(parsed["messages"], max_count=(5 if has_joke else 3))
+        _anti_template_messages(parsed, context_messages, user_content)
+        _apply_mbti_rhythm(parsed, char_id, longform)
     return parsed
 
-def _finalize_chat_reply(user_id: str, raw_text: str, user_content: str = "", char_id: str = "") -> tuple:
+def _finalize_chat_reply(user_id: str, raw_text: str, user_content: str = "", char_id: str = "", context_messages: list = None) -> tuple:
     """解析回复 JSON → 更新会话状态 + 关系变化 → 返回 (纯文本, 分条pieces)（用于记忆/微信/非流式响应）"""
     parsed = parse_chat_messages(raw_text)
-    _postprocess_reply_messages(user_id, char_id, parsed, user_content)
+    _postprocess_reply_messages(user_id, char_id, parsed, user_content, context_messages)
     st = user_states.get(user_id)
     cid = char_id or (st or {}).get("character_id", "")
     _apply_chat_side_effects(user_id, cid, parsed, user_content)
     text = "".join(m["text"] for m in parsed["messages"])
+    # 她回复里说了要去睡 → 记睡眠窗口（修「说了晚安又说没睡」；见 companion/sleep.py）
+    try:
+        from companion.sleep import mark_sleep_from_reply
+        mark_sleep_from_reply(user_id, cid, text,
+                              explicit=bool(parsed.get("sleeping")),
+                              reason="聊天里说了要去睡")
+    except Exception:
+        pass
     pieces = []
     for _m in parsed["messages"]:
         _p = {"text": _m["text"], "type": _m["type"], "delay": _m["delay"]}
@@ -183,10 +331,9 @@ def _finalize_chat_reply(user_id: str, raw_text: str, user_content: str = "", ch
         pieces.append(_p)
     return text, pieces
 
-def _split_longform_bubbles(parsed: dict, min_bubbles: int = 8) -> dict:
-    """长文输出模式兜底（规格§14 多消息流水线）：模型把完整内容挤在 1~3 条大消息里时，
-    按自然句边界确定性拆成多条短气泡（真人微信逐条发的节奏），避免一堵墙式消息。
-    只在『内容已完整（>120 字）但气泡数过少』时触发，不改变内容本身。"""
+def _split_longform_bubbles(parsed: dict, min_bubbles: int = 4) -> dict:
+    """长文输出模式兜底：模型把完整内容挤成 1~3 条时，按自然句边界拆成 2~4 条长气泡；
+    长文允许 30~80 字/条，不再切成十几条短句。"""
     msgs = parsed.get("messages") or []
     if not msgs:
         return parsed
@@ -195,14 +342,9 @@ def _split_longform_bubbles(parsed: dict, min_bubbles: int = 8) -> dict:
         return parsed
     text = total.strip()
     parts = [p.strip() for p in re.split(r"(?<=[。！？!?…])\s*|\n+", text) if p.strip()]
-    if len(parts) < min_bubbles:
-        refined = []
-        for p in parts:
-            if len(p) > 60:
-                refined.extend(q.strip() for q in re.split(r"(?<=[，,；;])\s*", p) if q.strip())
-            else:
-                refined.append(p)
-        parts = [p for p in refined if p.strip()]
+    if len(parts) < 2:
+        return parsed
+    parts = [p.rstrip("，,、;；").strip() for p in parts if p.strip()][:4]
     if len(parts) < 2:
         return parsed
     bubbles = [
@@ -504,7 +646,7 @@ def _attention_state(user_id: str, char_id: str, user_input: str, context_messag
 def _attention_prompt_block(user_id: str, char_id: str, user_input: str, context_messages: list = None) -> str:
     att = _attention_state(user_id, char_id, user_input, context_messages)
     hint = {
-        "FOCUSED": "你现在很专注地跟对方聊着，可以多接几句、顺着追问一句，别自己跑题。",
+        "FOCUSED": "你现在很专注地跟对方聊着，接一句就够，别自己跑题。",
         "CASUAL": "普通闲聊状态：对方说啥接啥，一句两句都行，不硬撑热情，不需要刻意找话题。",
         "DISTRACTED": "你现在有点心不在焉（刚被打断/没睡好/懒得动）：回应短一点，别急着长篇接话；对方突然换话题你更可能直接跟过去，而不是惊讶。",
         "LISTENING": "对方正在跟你讲一件事/一个故事，你先听着：别抢话、别急着转移话题、别长篇大论。用短回应（嗯/然后呢/草/真的假的/后来呢）让对方继续讲。",
@@ -595,14 +737,17 @@ def _apply_chat_side_effects(user_id: str, char_id: str, parsed: dict, user_cont
     _apply_emotion_delta(user_id, char_id, parsed)
     relation = _apply_relation_delta(user_id, char_id, parsed.get("relation_delta"), parsed.get("relationship", ""))
     # 双记忆层：模型每轮 JSON 带出的记忆条目入库（long 写死 / short 带权重，后台自动遗忘与转长期）
+    # self（"她自己说过、要保持一致"的事）也必须入库 —— 以前这里只传 long/short，
+    # 模型解析出来的 memory["self"] 被整块丢掉，是角色自相矛盾的一个来源。
     mem_data = parsed.get("memory") or {}
-    if mem_data.get("long") or mem_data.get("short"):
+    if mem_data.get("long") or mem_data.get("short") or mem_data.get("self"):
         try:
-            mem_mgr.save_dual_memory(user_id, mem_data.get("long"), mem_data.get("short"), char_id=char_id)
+            mem_mgr.save_dual_memory(user_id, mem_data.get("long"), mem_data.get("short"),
+                                     char_id=char_id, self_items=mem_data.get("self"))
         except Exception as e:
             logger.warning(f"[记忆] 双记忆入库失败: {e}")
     # 兜底：用户明确自曝事实/偏好但模型这轮没输出记忆条目 → 确定性补录短期记忆
-    if user_content and not (mem_data.get("long") or mem_data.get("short")):
+    if user_content and not (mem_data.get("long") or mem_data.get("short") or mem_data.get("self")):
         try:
             _facts = _detect_user_fact(user_content)
             if _facts:

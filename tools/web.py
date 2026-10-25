@@ -5,8 +5,10 @@
 - fetch_hotlist: 每日热门（B站热门视频 + DDG 综合热搜），本地缓存
 """
 import asyncio
+import ipaddress
 import json
 import re
+import socket
 import time
 import html as html_mod
 import urllib.parse
@@ -33,11 +35,37 @@ def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-async def _get(url: str, params: dict = None, headers: dict = None, timeout: float = 15) -> httpx.Response:
+def is_public_http_url(url: str) -> bool:
+    """只放行 http/https，且域名解析出的所有地址都是公网 IP。
+
+    用于挡住 `/v1/web/link` 这类「用户给什么就抓什么」的入口：
+    否则本机服务会被当成跳板去访问 192.168.2.x / 127.0.0.1 / 169.254.x（SSRF）。
+    """
+    try:
+        p = urllib.parse.urlparse((url or "").strip())
+        if p.scheme not in ("http", "https") or not p.hostname:
+            return False
+        port = p.port or (443 if p.scheme == "https" else 80)
+        infos = socket.getaddrinfo(p.hostname, port, type=socket.SOCK_STREAM)
+        if not infos:
+            return False
+        for info in infos:
+            ip = ipaddress.ip_address(info[4][0])
+            if (ip.is_private or ip.is_loopback or ip.is_link_local
+                    or ip.is_multicast or ip.is_reserved or ip.is_unspecified):
+                return False
+        return True
+    except Exception:
+        return False
+
+
+async def _get(url: str, params: dict = None, headers: dict = None, timeout: float = 15,
+               allow_redirects: bool = True) -> httpx.Response:
     h = dict(_HDRS)
     if headers:
         h.update(headers)
-    async with httpx.AsyncClient(timeout=timeout, headers=h, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=timeout, headers=h,
+                                 follow_redirects=allow_redirects) as client:
         return await client.get(url, params=params)
 
 
@@ -95,20 +123,35 @@ async def _weather_now(query: str) -> list:
     return []
 
 
+_SEARCH_BUDGET = 20.0  # 单次搜索总时限：天气 + 多引擎降级链合计，避免离线/挂死时占用并发闸过久
+
+
 async def web_search(query: str, top_k: int = 5) -> list:
-    """搜索网页，返回 [{title, url, snippet}]，全部失败返回 []。天气类查询先用 wttr.in 兜底（真实数据），
+    """搜索网页，返回 [{title, url, snippet}]，全部失败/超时返回 []。天气类查询先用 wttr.in 兜底（真实数据），
     再走降级链：Bing(主) → Sogou → 搜狗微信 → 百度联想 → 百度移动 → 百度桌面。"""
     out = []
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + _SEARCH_BUDGET
+
+    async def _within(coro, max_wait: float) -> list:
+        return await asyncio.wait_for(coro, timeout=max(1.0, min(max_wait, deadline - loop.time())))
+
     try:
-        out.extend(await _weather_now(query))
+        out.extend(await _within(_weather_now(query), 8.0))
+    except asyncio.TimeoutError:
+        logger.warning("[联网] 天气兜底超时，跳过")
     except Exception as e:
         logger.warning(f"[联网] 天气兜底失败: {e}")
     for fn in (_bing_search, _sogou_search, _sogou_wx_search, _baidu_mobile_search, _baidu_suggest, _baidu_search):
+        if deadline - loop.time() <= 0:
+            break
         try:
-            got = await fn(query, top_k)
+            got = await _within(fn(query, top_k), 7.0)
             if got:
                 out.extend(got)
                 break
+        except asyncio.TimeoutError:
+            logger.warning(f"[联网] 搜索降级: {fn.__name__} 超时")
         except Exception as e:
             logger.warning(f"[联网] 搜索降级: {type(e).__name__}: {e}")
     # 去重（同 URL 只留一条，天气结果优先）
@@ -408,7 +451,14 @@ async def _baidu_image_search(query: str, top_k: int) -> list:
 async def fetch_page_meta(url: str) -> Optional[dict]:
     """抓网页 og 元信息（标题/描述），失败或非网页返回 None"""
     try:
-        r = await _get(url, timeout=12)
+        if not is_public_http_url(url):
+            logger.warning(f"[联网] 拒绝非公网地址: {(url or '')[:120]}")
+            return None
+        # 不跟随重定向：防止公网地址 302 到 127.0.0.1/内网，绕过上面的校验
+        r = await _get(url, timeout=12, allow_redirects=False)
+        if r.status_code in (301, 302, 303, 307, 308):
+            logger.warning(f"[联网] 跳过重定向地址: {(url or '')[:120]}")
+            return None
         if r.status_code != 200:
             return None
         text = r.text
@@ -442,6 +492,9 @@ async def video_info(url: str) -> Optional[dict]:
     """解析视频链接信息（B站/YouTube/抖音/通用 og），失败返回 None（模型可自然说'我手机里没有xxx'）"""
     url = (url or "").strip()
     if not url.startswith("http"):
+        return None
+    if not is_public_http_url(url):
+        logger.warning(f"[联网] 拒绝非公网视频地址: {url[:120]}")
         return None
     if "bilibili.com" in url or "b23.tv" in url:
         info = await _bilibili_info(url)

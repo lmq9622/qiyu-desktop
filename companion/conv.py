@@ -9,14 +9,31 @@ from loguru import logger
 from companion.constants import SCENES, SCENE_BEHAVIOR, SCENE_LABELS, SCENE_TRIGGERS, _STORY_STOP_RE
 from companion.state import CONV_STATE_JSON, SHARED_EVENTS_JSON, _conv_store, _schedules_store, _shared_events, save_user_store
 from companion.settings import _desire_value
-from companion.relations import _clamp_int, _init_relation
+from companion.relations import _clamp_int, _init_relation, note_proactive_reply, reset_no_reply_streak
 from companion.emotions import _mood_blocks_proactive
 
+_conv_dirty = False
+
+
+def _mark_conv_dirty():
+    """标记录音会话状态需要落盘（用于后台批量扫描时合并写盘）。"""
+    global _conv_dirty
+    _conv_dirty = True
+
+
 def _save_conv_store():
+    global _conv_dirty
+    _conv_dirty = False
     try:
         save_user_store("conv_state", _conv_store)
     except Exception as e:
         logger.error(f"保存会话状态失败: {e}")
+
+
+def flush_conv_store():
+    """后台批量更新结束后一次性落盘；无变更不写。"""
+    if _conv_dirty:
+        _save_conv_store()
 
 def _save_shared_events():
     try:
@@ -54,35 +71,103 @@ def _conv_state(user_id: str, char_id: str) -> dict:
         _conv_store[k] = cs
     return cs
 
+def _recent_reply_freq(user_id: str, char_id: str, hours: float = 2.0) -> int:
+    """近 hours 小时内用户实际回复条数（主动消息要不要发的依据之一）。"""
+    try:
+        from memory import get_memory_manager
+        hist = get_memory_manager().get_recent_history(user_id, limit=40, char_id=char_id)
+    except Exception:
+        return 0
+    now = time.time()
+    n = 0
+    for m in hist or []:
+        if m.get("role") != "user":
+            continue
+        try:
+            ts = datetime.fromisoformat(str(m.get("timestamp") or ""))
+        except Exception:
+            continue
+        if ts.timestamp() > now - hours * 3600:
+            n += 1
+    return n
+
 def _interaction_need_value(user_id: str, char_id: str, parsed: dict | None = None, user_input: str = "") -> int:
-    """0=不太想聊 1=可以应付 2=正常 3=有兴趣 4=很想聊（当前主动性和聊天欲，与耐心度解耦）"""
+    """0=不太想聊 1=可以应付 2=正常 3=有兴趣 4=很想聊（当前主动性和聊天欲，与耐心度解耦）。
+
+    修复：主动消息场景（无模型 parsed 输入）时不再因 mi=0 恒低 → 白天永远 low_need。
+    改为由 空闲时长 + 近期回复频率 + 关系 + 耐心 + 最近主动次数 + 时段 + 未完成话题 共同决定；
+    模型刚解析过聊天时，其 interaction_need 只作 0.3 权重的小修正。
+    """
     cs = _conv_state(user_id, char_id)
     rel = _init_relation(user_id, char_id)
     aff = _clamp_int(rel.get("affinity"), 50)
-    v = 2.0
+    pat = _desire_value(user_id, char_id)
     now = time.time()
-    last_u = cs.get("last_user_at") or 0
-    if last_u and now - last_u < 120:
+    last_u = float(cs.get("last_user_at") or 0)
+    idle = (now - last_u) if last_u else 0.0
+    v = 2.0
+    # 1) 空闲时长：刚聊过想接住；隔一会儿想找话题；太久没聊更想冒泡（白天不至于归零）
+    if last_u:
+        if idle < 900:
+            v += 0.5
+        elif idle < 7200:
+            v += 0.5
+        elif idle < 21600:
+            v += 1.0
+        else:
+            v += 1.5
+    else:
+        v += 0.5  # 新关系第一次主动打招呼
+    # 2) 近期回复频率：最近 2h 内聊得越勤，此刻主动越自然（证明对方在线/愿意聊）
+    freq = _recent_reply_freq(user_id, char_id)
+    if freq >= 8:
         v += 1.0
-    elif last_u and now - last_u > 3600:
-        v -= 1.0
+    elif freq >= 4:
+        v += 0.5
+    # 3) 关系：好感越高越愿意主动
     if aff >= 75:
         v += 1.0
+    elif aff >= 60:
+        v += 0.5
     elif aff <= 30:
+        v -= 0.5
+    # 4) 耐心（_desire_value=角色当前耐心/精力）
+    if pat >= 70:
+        v += 0.5
+    elif pat <= 30:
         v -= 1.0
+    # 5) 最近主动次数：刚主动过别连环打扰（Context Gate 的 recent_proactive 仍会硬拦 <8 分钟）
+    last_p = float(cs.get("last_proactive_at") or 0)
+    if last_p and now - last_p < 15 * 60:
+        v -= 1.5
+    elif last_p and now - last_p < 7200:
+        v -= 0.5
+    # 6) 时段
     hour = datetime.now().hour
-    if 23 <= hour or hour < 6:
-        v = v + 1.0 if aff >= 70 else v - 1.0
+    if hour >= 23 or hour < 6:
+        v += 1.0 if aff >= 60 else -0.5
+    elif 6 <= hour < 9:
+        v -= 0.5   # 早上尽量少打扰
+    elif (12 <= hour < 14) or (18 <= hour < 23):
+        v += 0.5   # 午休/晚间更自然
+    # 7) 上次主动对方没回 → 不连环轰炸
     if cs.get("unanswered_pending"):
         v -= 1.0
-    mi = 0
-    try:
-        mi = int(float((parsed or {}).get("interaction_need") or 0))
-    except Exception:
-        mi = 0
-    if mi in (0, 1, 2, 3, 4):
-        v = v * 0.6 + mi * 0.4
-    return max(0, min(4, int(round(v))))
+    # 8) 正在讲故事 → 别开新话题打断（storycheck 单独负责轻唤）
+    if cs.get("story_active"):
+        v -= 1.0
+    # 9) 最近话题钩子：聊过具体话题 → 主动时有话可接（不生硬开新话题）
+    if (cs.get("last_topic") or "").strip() and (cs.get("unfinished_topic") or "").strip():
+        v += 0.5
+    # 模型信号（刚解析过聊天）只作小修正；没有模型输入时不再恒低
+    if parsed:
+        try:
+            mi = int(float((parsed or {}).get("interaction_need") or 2))
+        except Exception:
+            mi = 2
+        mi = max(0, min(4, mi))
+        v = v * 0.7 + mi * 0.3
+    return max(0, min(4, int(v + 0.5)))
 
 def _compute_scene(user_id: str, char_id: str, parsed: dict | None = None, user_input: str = "") -> str:
     """综合关系/耐心/意愿/意图/情绪/话题/活跃/时段/未完成任务/最近记忆，算出当前场景。
@@ -122,7 +207,8 @@ def _compute_scene(user_id: str, char_id: str, parsed: dict | None = None, user_
     prev = cs.get("scene")
     return prev if prev in SCENES else "ordinary_chat"
 
-def _update_conv_state(user_id: str, char_id: str, event: str, parsed: dict | None = None, user_input: str = ""):
+def _update_conv_state(user_id: str, char_id: str, event: str, parsed: dict | None = None,
+                       user_input: str = "", save: bool = True):
     """事件驱动的会话状态机：user_message / ai_reply / proactive_sent / idle"""
     from companion.behavior import _refresh_unfinished_topic
     if not user_id or not char_id:
@@ -142,6 +228,22 @@ def _update_conv_state(user_id: str, char_id: str, event: str, parsed: dict | No
         if user_input:
             try:
                 _refresh_unfinished_topic(user_id, char_id, user_input)
+            except Exception:
+                pass
+        # 主动消息反馈：用户冷淡→记冷淡信号(即时停手)；热情→清零计数
+        _lp_at = float(cs.get("last_proactive_at") or 0)
+        # 以前只有 1 小时内回主动消息才清零"连续没回"计数：用户第二天才回，
+        # 计数一直卡在上限，scheduler 就再也不让角色主动找话了
+        if user_input:
+            try:
+                reset_no_reply_streak(user_id, char_id)
+            except Exception:
+                pass
+        if user_input and _lp_at and (now - _lp_at) < 3600:
+            try:
+                _tag = note_proactive_reply(user_id, char_id, user_input)
+                if _tag != "neutral":
+                    logger.info(f"[主动消息] {user_id}/{char_id} 对主动消息的反馈: {_tag} | {user_input[:30]}")
             except Exception:
                 pass
         # 听众回来了 / 故事被叫停 → 结束讲故事状态
@@ -174,18 +276,31 @@ def _update_conv_state(user_id: str, char_id: str, event: str, parsed: dict | No
         cs["last_proactive_at"] = now
         cs["conv_state"] = "QUIET"
     elif event == "idle":
+        # 后台扫描每 20s 会对所有历史 (用户,角色) 触发一次 idle；
+        # 没有真实状态转移时不必全量序列化 conv_state（高频全量写会拖慢主事件循环）。
+        _changed = False
         last_any = max(cs.get("last_user_at") or 0, cs.get("last_ai_at") or 0)
-        if cs["conv_state"] == "ACTIVE" and now - last_any > 3600:
+        # 2026-10-07：ACTIVE 原来要静默满 1 小时才松开，找话等于被关在门外。
+        # 8 分钟没新消息就当这轮聊完（正在来回发的时候 last_any 一直在刷新，不会误判）。
+        if cs["conv_state"] == "ACTIVE" and now - last_any > 8 * 60:
             cs["conv_state"] = "QUIET"
             cs["ended_at"] = now
-        if now - last_any > 7200:
+            _changed = True
+        # 半天没说话才算这天的对话结束；冷却只留 15 分钟，不要再额外罚一小时。
+        if now - last_any > 6 * 3600:
             cs["conv_state"] = "ENDED"
             if not cs.get("cooldown_until") or cs["cooldown_until"] < now:
-                cs["cooldown_until"] = now + 3600
+                cs["cooldown_until"] = now + 15 * 60
+            _changed = True
         if cs["conv_state"] in ("ENDED", "COOLDOWN") and (cs.get("cooldown_until") or 0) <= now:
             cs["conv_state"] = "AVAILABLE_FOR_PROACTIVE"
+            _changed = True
+        if not _changed:
+            return
     cs["updated_at"] = now
-    _save_conv_store()
+    _mark_conv_dirty()
+    if save:
+        flush_conv_store()
 
 def _record_shared_event(user_id: str, char_id: str, event_id: str, content: str, topic: str = ""):
     """主动分享事件登记（event_id 幂等；换说法仍认同一事件，避免重复主动发送）"""
@@ -233,9 +348,11 @@ def _context_gate(user_id: str, char_id: str, now: float | None = None) -> tuple
     cs = _conv_state(user_id, char_id)
     if cs.get("conv_state") == "ACTIVE":
         return False, "active"
-    if now - (cs.get("last_user_at") or 0) < 5400:
+    # 刚说完别立刻找话（8 分钟）；她自己刚主动过也先歇 8 分钟。
+    # 以前是 90 分钟 / 25 分钟，叠上 ACTIVE 要等 1 小时，线上几乎不来找。
+    if now - (cs.get("last_user_at") or 0) < 8 * 60:
         return False, "recent_user"
-    if now - (cs.get("last_proactive_at") or 0) < 1500:
+    if now - (cs.get("last_proactive_at") or 0) < 8 * 60:
         return False, "recent_proactive"
     if (cs.get("cooldown_until") or 0) > now:
         return False, "cooldown"
@@ -286,6 +403,7 @@ __all__ = [
     "_conv_state",
     "_event_similar_to_shared",
     "_interaction_need_value",
+    "flush_conv_store",
     "_recent_shared_events",
     "_record_shared_event",
     "_save_conv_store",

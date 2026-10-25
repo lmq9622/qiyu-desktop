@@ -22,7 +22,8 @@ llm_client = None
 from companion.state import _proactive_store, _schedules_store, user_states
 from companion.settings import _apply_thinking_kwargs, _route_llm_info, load_runtime_settings
 from companion.relations import _init_relation, _register_schedule, _save_proactive, _save_schedules
-from companion.conv import _check_unanswered, _context_gate, _conv_state, _event_similar_to_shared, _record_shared_event, _save_conv_store, _update_conv_state
+from companion.conv import (_check_unanswered, _context_gate, _conv_state, _event_similar_to_shared,
+                            _record_shared_event, _save_conv_store, _update_conv_state, flush_conv_store)
 from companion.behavior import _topic_similarity
 from companion.scheduler import proactive_scheduler
 
@@ -86,14 +87,28 @@ _outline_inflight: set = set()
 
 _day_ctx_last = {}
 
-async def _send_active_messages(user_id: str, messages: list, conversation_state: str = "闲聊", reason: str = "", char_id: str = ""):
-    """主动消息：写入记忆 + 推送给前端（真人节奏播放）；无内容则不发送"""
+async def _send_active_messages(user_id: str, messages: list, conversation_state: str = "闲聊", reason: str = "", char_id: str = "") -> bool:
+    """主动消息：写入记忆 + 推送给前端（真人节奏播放）；无内容则不发送。
+
+    返回**是否真的发出**（True=已下发；False=被睡眠门/通道拒绝或无内容），
+    调用方（_fire_proactive）据此决定要不要记 day_count / no_reply_streak / 冷却。
+    """
     st = user_states.get(user_id) or {}
     if not char_id:
         char_id = st.get("character_id", "")
     reply_text = "".join(m.get("text", "") for m in messages or [])
     if not reply_text:
-        return
+        return False
+    # 统一睡眠门（最后一道）：所有"她主动开口"的出口都从这里发出去。
+    # 她说了晚安进入睡眠窗口后，主动消息一律不开口；唯一例外是用户自己让的提醒。
+    if reason not in ("reminder",):
+        try:
+            from companion.sleep import is_asleep
+            if is_asleep(user_id, char_id):
+                logger.info(f"[主动] {reason or 'active'} 被睡眠门拦下（她这会儿在睡）")
+                return False
+        except Exception:
+            pass
     _pieces = []
     for m in (messages or []):
         _p = {"text": m.get("text", ""), "type": m.get("type", "statement"), "delay": m.get("delay", 0)}
@@ -104,6 +119,13 @@ async def _send_active_messages(user_id: str, messages: list, conversation_state
         user_id, "assistant", reply_text, char_id,
         pieces=_pieces,
     )
+    # 主动消息里说了"我困了 晚安 明天见" → 同样要把"她要睡了"的窗口记上，
+    # 否则用户一分钟后回一句，她又像没说过晚安一样接着聊（左右脑互搏）。
+    try:
+        from companion.sleep import mark_sleep_from_reply
+        mark_sleep_from_reply(user_id, char_id, reply_text, reason="主动消息里说要睡了")
+    except Exception as _e_sl:
+        logger.debug(f"[主动] 记睡眠窗口失败: {_e_sl}")
     if reason in ("proactive", "night", "reminder"):
         if st.get("character_id") == char_id:
             st["last_proactive_at"] = time.time()
@@ -114,19 +136,26 @@ async def _send_active_messages(user_id: str, messages: list, conversation_state
         cs["last_proactive_text"] = reply_text[:200]
         _update_conv_state(user_id, char_id, "proactive_sent")
     # 外部通讯用户：通过通道注册表真实下发（ClawBot / itchat / 预留通道）
+    # registry.send 内部是同步 HTTP + time.sleep 重试，直接在主事件循环里调会卡住整个后端，
+    # 所以丢到线程池里执行（run_in_executor），重试延迟也用 await asyncio.sleep。
+    delivered = True
     if user_id.startswith("wx_"):
         try:
+            _loop = asyncio.get_running_loop()
             for i, m in enumerate(messages or []):
                 txt = (m.get("text") or "").strip()
                 if not txt:
                     continue
-                if not channel_registry.send(user_id, txt):
+                ok = await _loop.run_in_executor(None, channel_registry.send, user_id, txt)
+                if not ok:
                     logger.warning(f"[通道] 主动消息下发失败: {user_id}")
+                    delivered = False
                 delay = (m.get("delay") or 0) / 1000.0
                 if i < len(messages or []) - 1 and delay > 0:
-                    time.sleep(min(delay, 3.0))
+                    await asyncio.sleep(min(delay, 3.0))
         except Exception as e:
             logger.warning(f"[通道] 主动消息下发失败: {e}")
+            delivered = False
     _push_event(user_id, {
         "type": "assistant_messages",
         "conversation_state": conversation_state,
@@ -135,12 +164,13 @@ async def _send_active_messages(user_id: str, messages: list, conversation_state
         "reason": reason,
         "char_id": char_id,
     })
+    return delivered
 
-async def _fire_nudge(user_id: str, context: str, char_id: str = "", attempt: int = 0, total: int = 1):
+async def _fire_nudge(user_id: str, context: str, char_id: str = "", attempt: int = 0, total: int = 1) -> bool:
     st = user_states.get(user_id)
     if st is None:
         logger.warning(f"[调度] {user_id} 无状态，跳过追问")
-        return
+        return False
     if not char_id:
         char_id = st.get("character_id", "")
     if not char_id:
@@ -149,16 +179,27 @@ async def _fire_nudge(user_id: str, context: str, char_id: str = "", attempt: in
         st["character_id"] = char_id
     if not char_id:
         logger.warning(f"[调度] {user_id} 无可用角色，跳过追问")
-        return
+        return False
     if not llm_client or not llm_client.available:
         logger.warning(f"[调度] {user_id} LLM 不可用，跳过追问")
-        return
+        return False
     try:
         messages = await llm_client.generate_nudge(char_id, user_id, context, attempt=attempt, total=total)
+        if not messages:
+            return False
+        # 追问内容闸门：真人不会隔一小时只发「行吧」「人呢」「？」这种空话。
+        # 追问必须带上那件没说完的事的实质内容，否则宁可不发。
+        from companion.active_guards import _nudge_has_substance
+        _nudge_text = "".join(str(m.get("text") or "") for m in messages).strip()
+        if not _nudge_has_substance(_nudge_text):
+            logger.info(f"[追问] {user_id}/{char_id} 只生成了空话（{_nudge_text!r}），跳过不发")
+            return False
         await _send_active_messages(user_id, messages, "闲聊", reason="nudge", char_id=char_id)
         logger.info(f"[追问] 用户 {user_id} 第{attempt + 1}/{total}次追问已发送")
+        return True
     except Exception as e:
         logger.warning(f"[追问] 生成失败: {e}")
+        return False
 
 async def _fire_reminder(user_id: str, payload: dict):
     st = user_states.get(user_id)
@@ -188,6 +229,14 @@ async def _fire_reminder(user_id: str, payload: dict):
     except Exception as e:
         logger.warning(f"[提醒] 生成失败: {e}")
 
+def _same_proactive_opener(a: str, b: str) -> bool:
+    """两条主动消息都用「醒着/还没睡/在吗/忙啥」开头 → 视为重复开场。"""
+    ops = ("醒着", "还没睡", "在吗", "忙啥", "干啥", "干嘛", "睡了")
+    a = (a or "").strip()
+    b = (b or "").strip()
+    return any(a.startswith(o) and b.startswith(o) for o in ops)
+
+
 async def _fire_proactive(user_id: str, night: bool = False, char_id: str = ""):
     st = user_states.get(user_id)
     if not char_id:
@@ -213,6 +262,9 @@ async def _fire_proactive(user_id: str, night: bool = False, char_id: str = ""):
         key = f"{user_id}::{char_id}"
         prev = _proactive_store.get(key) or {}
         prev_text = (prev.get("last_text") or "").strip()
+        if prev_text and reply_text and _same_proactive_opener(prev_text, reply_text):
+            logger.info(f"[主动消息] {user_id}/{char_id} 与上次同一个开场，跳过")
+            return
         # 防重复开场白：和上次主动消息太像（比如隔一小时发两条差不多的）就跳过
         if prev_text and reply_text and _topic_similarity(prev_text, reply_text) > 0.6:
             logger.info(f"[主动消息] {user_id}/{char_id} 与上次开场白太像，跳过")
@@ -221,7 +273,45 @@ async def _fire_proactive(user_id: str, night: bool = False, char_id: str = ""):
         if _event_similar_to_shared(user_id, char_id, reply_text):
             logger.info(f"[主动消息] {user_id}/{char_id} 与近期主动内容重复，跳过")
             return
-        _proactive_store[key] = {"last_at": time.time(), "last_text": reply_text[:200]}
+        # 先真正发出去，再计数：以前 day_count / no_reply_streak / last_text / 冷却
+        # 都在 await 之前就写了 —— 被睡眠门或通道拒绝时照样计数，白占当天额度。
+        _sent = await _send_active_messages(user_id, messages, "闲聊",
+                                            reason="night" if night else "proactive", char_id=char_id)
+        if not _sent:
+            try:
+                from runtime.db import unified_store
+                unified_store.record_proactive(
+                    user_id, char_id, "proactive", reply_text[:200],
+                    topic=(_conv_state(user_id, char_id).get("last_topic") or "")[:80],
+                    decision="skipped")
+            except Exception:
+                pass
+            logger.info(f"[主动消息] {user_id}/{char_id} 未真正发出（睡眠门/通道拒绝），不计入当日额度")
+            return
+        _today = time.strftime("%Y-%m-%d")
+        _prev = _proactive_store.get(key) or {}
+        _day_count = (int(_prev.get("day_count") or 0) + 1) if _prev.get("day") == _today else 1
+        # 上限按"连续没被回复的次数"算：用户回了就清零，所以正常有来有回可以聊得更勤；
+        # 一直不回才停在 2~4 条（熟一点放宽），不再写成"每天总共只能发几条"。
+        _streak = int(_prev.get("no_reply_streak") or 0) + 1
+        _entry = dict(_prev)
+        _entry.update({"last_at": time.time(), "last_text": reply_text[:200], "day": _today,
+                       "day_count": _day_count, "no_reply_streak": _streak})
+        # 早安/晚安每天各记一次（避免同一天重复发）
+        try:
+            _hh = time.localtime().tm_hour
+            if 7 <= _hh < 10:
+                _entry["morning_sent"] = True
+                _entry["greet_day"] = _today
+            elif _hh >= 22:
+                _entry["night_sent"] = True
+                _entry["greet_day"] = _today
+            if _entry.get("greet_day") != _today:
+                _entry.pop("morning_sent", None)
+                _entry.pop("night_sent", None)
+        except Exception:
+            pass
+        _proactive_store[key] = _entry
         _save_proactive()
         try:
             from runtime.db import unified_store
@@ -231,7 +321,6 @@ async def _fire_proactive(user_id: str, night: bool = False, char_id: str = ""):
                 decision="sent")
         except Exception:
             pass
-        await _send_active_messages(user_id, messages, "闲聊", reason="night" if night else "proactive", char_id=char_id)
         cs = _conv_state(user_id, char_id)
         _record_shared_event(user_id, char_id, f"proactive_{int(time.time())}", reply_text, cs.get("last_topic", ""))
         logger.info(f"[主动消息] 用户 {user_id} 主动消息已发送")
@@ -293,7 +382,7 @@ async def _subagent_plan_search(query: str) -> list:
                 resp = await client.post(f"{route_url}/chat/completions", json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
-            msg = data.get("choices", [{}])[0].get("message", {}) or {}
+            msg = (data.get("choices") or [{}])[0].get("message", {}) or {}
             content = (msg.get("content") or "").strip()
             if not content:
                 content = (msg.get("reasoning_content") or "").strip()
@@ -487,8 +576,8 @@ async def _maybe_daily_proactive_for_char(user_id: str, char_id: str):
     # M4：决策全部交给 ProactiveScheduler（冷却/上下文门/关系/耐心/心情/概率）
     decision = proactive_scheduler.evaluate(user_id, char_id)
     if not decision.allowed:
-        if decision.reason == "context_gate":
-            _update_conv_state(user_id, char_id, "idle")
+        if decision.reason in ("context_gate", "recent_user", "recent_proactive", "active", "cooldown"):
+            _update_conv_state(user_id, char_id, "idle", save=False)
         return
     # 生成前先登记时间（进入冷却），避免失败后立刻重试
     proactive_scheduler.record_attempt(user_id, char_id)
@@ -532,6 +621,13 @@ async def _generate_daily_outline(user_id: str, char_id: str, date_str: str, min
     try:
         msgs = mem_mgr.get_messages_for_date(user_id, date_str, char_id)
         msgs = [m for m in msgs if (m.get("content") or "").strip() and m.get("content") != "(无回复)"]
+        # 连续重复的同一句话（测试/误触/网络重发）不进入总结，避免“用户连说好几声你好”
+        _dedup = []
+        for _m in msgs:
+            if _dedup and _m.get("role") == _dedup[-1].get("role") and _m.get("content") == _dedup[-1].get("content"):
+                continue
+            _dedup.append(_m)
+        msgs = _dedup
         if len(msgs) < min_messages or not llm_client or not llm_client.available:
             return
         if idle_minutes:
@@ -548,6 +644,7 @@ async def _generate_daily_outline(user_id: str, char_id: str, date_str: str, min
             "你是后台记忆整理器。下面是某人与一个角色的当天微信聊天记录。"
             "请生成一份当天的聊天大纲，用第一人称（我是那个角色）口语化写 2~4 句话，"
             "大致包含：今天我和用户聊了什么话题、各自/共同的倾向与观点、气氛或关系有没有变化。"
+            "只写聊天记录里明确出现的内容，没出现的不要编；不确定的就写“好像/没说清”，不要替用户下结论。"
             "不要列条、不要客套、不要复述每条消息。\n\n"
             f"日期：{date_str}\n聊天记录：\n{convo}"
         )
@@ -659,6 +756,12 @@ async def _regenerate_day_context(user_id: str, char_id: str, date_str: str = ""
             mem_mgr.save_daily_outline(user_id, date_str, outline, char_id)
         if events:
             mem_mgr.save_daily_events(user_id, date_str, char_id, events)
+        if outline or events:
+            # 全天总结：同一天只留最新一条（不再每次归纳都堆一条）
+            try:
+                mem_mgr.save_full_day_summary(user_id, char_id, date_str)
+            except Exception as e:
+                logger.warning(f"[当天记忆] 全天总结写入失败: {e}")
         logger.info(f"[当天记忆] {user_id}/{char_id}/{date_str} 大纲={bool(outline)} 事件={len(events)}条")
     except Exception as e:
         logger.warning(f"[当天记忆] 归纳失败: {e}")
@@ -725,7 +828,7 @@ async def _background_loop():
                         _spawn_tool_task(_fire_story_check(uid, task.get("payload") or {}), limited=True)
                 # 会话状态机 idle 扫描 + 主动消息没被回 → 记失落（按角色独立）
                 for _cid in [c for u, c in mem_mgr.get_user_char_pairs() if u == uid]:
-                    _update_conv_state(uid, _cid, "idle")
+                    _update_conv_state(uid, _cid, "idle", save=False)
                     _check_unanswered(uid, _cid, now)
                     # 讲故事后听众长时间没回 → 排一次轻唤（喂？/睡着了？）
                     try:
@@ -741,6 +844,8 @@ async def _background_loop():
                 await _maybe_daily_proactive(uid, today)
             # 每日聊天大纲：凌晨4点后补生成前一天（含次日打开补生成）；每天执行一次扫描即可
             await _maybe_daily_outline_pass(today)
+            # 本轮所有会话状态更新合并落盘一次（无变更不写）
+            flush_conv_store()
         except Exception as e:
             logger.error(f"[后台调度] 出错: {e}")
 
