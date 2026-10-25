@@ -163,8 +163,8 @@ ALLOWED_ORIGINS = [
 ]
 # 设置页回显 api_key 用的占位符：GET 不回传明文，前端原样提交占位符视为「不修改」
 API_KEY_MASK = "********"
-LLM_URL = os.getenv("LLM_BASE_URL", "http://192.168.2.6:8081/v1")
-LLM_MODEL = os.getenv("LLM_MODEL", "qwen3.6-35b-a3b-uncensored-heretic")
+LLM_URL = os.getenv("LLM_BASE_URL", "http://127.0.0.1:8080/v1")
+LLM_MODEL = os.getenv("LLM_MODEL", "your-model-name")
 # 路由模型（可选）：专门用于生成角色信息卡，配置后主对话模型只会看到信息卡、看不到人设标签
 LLM_ROUTE_URL = os.getenv("LLM_ROUTE_URL", "")
 LLM_ROUTE_MODEL = os.getenv("LLM_ROUTE_MODEL", "")

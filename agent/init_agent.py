@@ -16,8 +16,8 @@ load_dotenv()
 
 LETTA_BASE_URL = os.getenv("LETTA_BASE_URL", "http://127.0.0.1:8283")
 LETTA_ADMIN_TOKEN = os.getenv("LETTA_ADMIN_TOKEN", "")
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://192.168.2.6:8081/v1")
-LLM_MODEL = os.getenv("LLM_MODEL", "qwen3.6-35b")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://127.0.0.1:8080/v1")
+LLM_MODEL = os.getenv("LLM_MODEL", "your-model-name")
 CHARACTERS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "characters")
 
 

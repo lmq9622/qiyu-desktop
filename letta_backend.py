@@ -19,8 +19,8 @@ class LettaBackend:
     def __init__(self, base_url: str = "", token: str = "", llm_url: str = "", llm_model: str = ""):
         self.base_url = (base_url or os.getenv("LETTA_BASE_URL", "http://127.0.0.1:8283")).rstrip("/")
         self.token = token or os.getenv("LETTA_ADMIN_TOKEN", "")
-        self.llm_url = (llm_url or os.getenv("LLM_BASE_URL", "http://192.168.2.6:8081/v1")).rstrip("/")
-        self.llm_model = llm_model or os.getenv("LLM_MODEL", "qwen3.6-35b-a3b-uncensored-heretic")
+        self.llm_url = (llm_url or os.getenv("LLM_BASE_URL", "http://127.0.0.1:8080/v1")).rstrip("/")
+        self.llm_model = llm_model or os.getenv("LLM_MODEL", "your-model-name")
         self.available = False
         self._agent_cache: dict[str, str] = {}  # character_id -> agent_id
         self._http_client = None
